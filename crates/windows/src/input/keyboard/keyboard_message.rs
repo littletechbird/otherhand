@@ -79,6 +79,13 @@ impl WindowMessage {
     }
 }
 
+/// `WM_NULL`, which does nothing. A `SendMessage` returns only after the
+/// window's thread has handled every message sent to it before, so sending
+/// this one after a failure waits until nothing earlier is still queued.
+pub(crate) const fn null_message() -> WindowMessage {
+    WindowMessage::new(0, 0, 0)
+}
+
 pub(crate) fn activation_messages(active: bool) -> [WindowMessage; 3] {
     if active {
         [

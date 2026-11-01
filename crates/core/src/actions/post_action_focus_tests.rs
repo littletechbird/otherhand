@@ -26,17 +26,16 @@ fn type_after_focus(headed: bool, already_focused: bool) -> Result<ActionResult,
 }
 
 #[test]
-fn headed_typing_does_not_treat_a_pre_focus_selection_as_delivery_evidence() {
+fn headed_typing_without_a_trusted_selection_verifies_by_the_new_text_alone() {
     let result = type_after_focus(true, false).unwrap();
     assert_eq!(
         result.disposition(),
-        DeliverySemantics::delivered_unverified()
+        DeliverySemantics::delivered_verified()
     );
     assert_eq!(
         result.post_state.unwrap().value.as_deref(),
         Some("inserted")
     );
-    assert_eq!(result.details.unwrap()["verification_scope"], "unavailable");
 }
 
 #[test]

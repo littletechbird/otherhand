@@ -16,6 +16,7 @@ pub mod session;
 pub mod snapshot;
 mod storage;
 pub mod system;
+pub mod text_delivery;
 pub mod trace;
 pub mod tree;
 mod wait;

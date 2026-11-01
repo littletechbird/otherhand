@@ -22,7 +22,7 @@ pub(crate) fn verify_burst(
     adapter: &dyn PlatformAdapter,
     handle: &crate::NativeHandle,
     expected: Option<&str>,
-) {
+) -> Option<&'static str> {
     let read = || {
         let deadline = crate::Deadline::after(1_000).ok()?;
         adapter.get_live_element(handle, deadline).ok()
@@ -36,14 +36,12 @@ pub(crate) fn verify_burst(
         std::thread::sleep(POLL);
         live = read();
     }
-    let Some(object) = result.as_object_mut() else {
-        return;
-    };
+    let object = result.as_object_mut()?;
     let reason = match &live {
         Some(live) => {
             object.insert("post_state".into(), json!(live.state));
             match expected {
-                Some(text) if live.state.value.as_deref() == Some(text) => return,
+                Some(text) if live.state.value.as_deref() == Some(text) => return None,
                 Some(_) => "postcondition_mismatch",
                 None => "insufficient_evidence",
             }
@@ -55,7 +53,7 @@ pub(crate) fn verify_burst(
     };
     let verified = json!(DeliverySemantics::delivered_verified());
     if object.get("disposition") != Some(&verified) {
-        return;
+        return None;
     }
     object.insert(
         "disposition".into(),
@@ -66,6 +64,7 @@ pub(crate) fn verify_burst(
         details.insert("verification_scope".into(), "unavailable".into());
         details.insert("verification_reason".into(), reason.into());
     }
+    Some(reason)
 }
 
 #[cfg(test)]

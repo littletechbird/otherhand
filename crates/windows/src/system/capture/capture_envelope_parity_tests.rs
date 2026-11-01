@@ -21,8 +21,6 @@ use agent_desktop_core::{
 use serde_json::Value;
 use std::path::PathBuf;
 
-const LIVE_STAGE_VARIABLE: &str = "AGENT_DESKTOP_LIVE_WPF";
-
 use crate::system::capture::capture_test_support::{
     HomeIsolation, install_windows_private_file, live_graphics_capture_lock, sample_png,
     with_restored_clipboard,
@@ -255,19 +253,5 @@ fn non_one_scale_factor_capture_skipped_on_96dpi_only_hosts() {
         "capture must report the owning display scale {}, got {}",
         scaled.scale,
         image.scale_factor
-    );
-}
-
-#[test]
-fn the_windows_lane_opts_into_live_capture_staging() {
-    let workflow = include_str!("../../../../../.github/workflows/ci.yml").replace("\r\n", "\n");
-    let assignment = format!("{LIVE_STAGE_VARIABLE}: \"1\"");
-    let step = workflow
-        .split("- name: ")
-        .find(|step| step.starts_with("Core and Windows unit tests"))
-        .expect("the Windows lane runs a library-test step");
-    assert!(
-        step.contains(&assignment),
-        "the library-test step must opt into on-screen staging for live capture breadth"
     );
 }

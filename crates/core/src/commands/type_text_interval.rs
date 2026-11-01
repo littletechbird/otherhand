@@ -73,12 +73,14 @@ pub(crate) fn execute(
     }
     if let Some(burst) = &burst {
         let expected = expected_final_value(&last, &units);
-        super::type_text_interval_verify::verify_burst(
+        if let Some(reason) = super::type_text_interval_verify::verify_burst(
             &mut last,
             adapter,
             &burst.handle,
             expected.as_deref(),
-        );
+        ) {
+            return Err(burst_not_verified(&last, reason, units.len()));
+        }
     }
     let value = with_keystrokes(last, units.len(), interval_ms);
     if context.wait_selector().is_none() {
@@ -224,6 +226,24 @@ fn after_partial_delivery(error: AppError, typed: usize, total: usize) -> AppErr
         adapter_error
             .with_details(details)
             .with_disposition(DeliverySemantics::delivered_unverified()),
+    )
+}
+
+/// `type` never passes text it could not read back, so a burst whose final
+/// read did not show the whole text fails with what the field held.
+fn burst_not_verified(last: &Value, reason: &str, keystrokes: usize) -> AppError {
+    AppError::Adapter(
+        AdapterError::new(
+            crate::ErrorCode::ActionFailed,
+            "Typed text did not show up in the field as requested",
+        )
+        .with_suggestion("Read the field with 'get' to see what landed before typing again.")
+        .with_details(json!({
+            "verification_reason": reason,
+            "post_state": last.get("post_state").cloned().unwrap_or(Value::Null),
+            "keystrokes": keystrokes,
+        }))
+        .with_disposition(DeliverySemantics::delivered_unverified()),
     )
 }
 

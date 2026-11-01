@@ -30,6 +30,18 @@ fn sent() -> Vec<WindowMessage> {
         .collect()
 }
 
+/// Stands in for the verified chunk engine: sends "hi" and
+/// fails the way the engine does when nothing could be sent.
+fn deliver_hi(deadline: agent_desktop_core::Deadline) -> Result<(), AdapterError> {
+    let messages = text_messages("hi");
+    if send_window_messages(ROOT, &messages, deadline) < messages.len() {
+        return Err(deadline
+            .timeout_error()
+            .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()));
+    }
+    Ok(())
+}
+
 fn expected(parts: &[&[WindowMessage]]) -> Vec<WindowMessage> {
     parts.concat()
 }
@@ -46,6 +58,7 @@ fn background_window_is_activated_typed_and_deactivated_in_order() {
             send_window_messages(ROOT, &click, deadline);
             Ok(())
         },
+        deliver_hi,
         || true,
     )
     .expect("typed");
@@ -61,7 +74,7 @@ fn background_window_is_activated_typed_and_deactivated_in_order() {
     );
     assert_eq!(step.label(), "WindowMessage.type_text");
     assert_eq!(step.mechanism(), Some(StepMechanism::PhysicalSynthetic));
-    assert_eq!(step.verified(), Some(false));
+    assert_eq!(step.verified(), Some(true));
     assert!(matches!(step.outcome, ActionStepOutcome::Succeeded));
 }
 
@@ -69,7 +82,8 @@ fn background_window_is_activated_typed_and_deactivated_in_order() {
 fn foreground_window_is_typed_without_activation_messages() {
     sink::reset();
 
-    type_text_by_messages(plan(true), deadline(5_000), |_| Ok(()), || true).expect("typed");
+    type_text_by_messages(plan(true), deadline(5_000), |_| Ok(()), deliver_hi, || true)
+        .expect("typed");
 
     assert_eq!(sent(), text_messages("hi"));
 }
@@ -78,7 +92,14 @@ fn foreground_window_is_typed_without_activation_messages() {
 fn window_that_became_foreground_is_not_deactivated() {
     sink::reset();
 
-    type_text_by_messages(plan(false), deadline(5_000), |_| Ok(()), || false).expect("typed");
+    type_text_by_messages(
+        plan(false),
+        deadline(5_000),
+        |_| Ok(()),
+        deliver_hi,
+        || false,
+    )
+    .expect("typed");
 
     assert_eq!(
         sent(),
@@ -99,6 +120,7 @@ fn failed_focus_types_nothing_and_still_deactivates() {
                 "focus did not move",
             ))
         },
+        deliver_hi,
         || true,
     )
     .expect_err("focus failed");
@@ -115,7 +137,7 @@ fn failed_focus_types_nothing_and_still_deactivates() {
 fn expired_deadline_sends_nothing_and_reports_not_delivered() {
     sink::reset();
 
-    let error = type_text_by_messages(plan(false), deadline(0), |_| Ok(()), || true)
+    let error = type_text_by_messages(plan(false), deadline(0), |_| Ok(()), deliver_hi, || true)
         .expect_err("no budget");
 
     assert_eq!(
@@ -136,6 +158,7 @@ fn deadline_exhausted_while_focusing_still_deactivates() {
             std::thread::sleep(deadline.remaining());
             Ok(())
         },
+        deliver_hi,
         || true,
     )
     .expect_err("budget spent");
@@ -144,6 +167,29 @@ fn deadline_exhausted_while_focusing_still_deactivates() {
         error.disposition.delivery(),
         DeliveryDisposition::NotDelivered
     );
+    assert_eq!(
+        sent(),
+        expected(&[&activation_messages(true), &activation_messages(false)])
+    );
+}
+
+#[test]
+fn text_that_did_not_land_fails_and_still_deactivates() {
+    sink::reset();
+
+    let error = type_text_by_messages(
+        plan(false),
+        deadline(5_000),
+        |_| Ok(()),
+        |_| {
+            Err(AdapterError::new(ErrorCode::ActionFailed, "not landed")
+                .with_disposition(agent_desktop_core::DeliverySemantics::delivered_unverified()))
+        },
+        || true,
+    )
+    .expect_err("unverified text must not pass");
+
+    assert_eq!(error.message, "not landed");
     assert_eq!(
         sent(),
         expected(&[&activation_messages(true), &activation_messages(false)])

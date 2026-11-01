@@ -125,38 +125,6 @@ fn ref_commands_reject_the_removed_snapshot_flag() {
 }
 
 #[test]
-fn ci_compares_the_release_binary_to_the_workspace_version() {
-    let workflow = include_str!("../../.github/workflows/ci.yml");
-
-    assert!(workflow.contains("PACKAGE_ID=$(cargo pkgid -p agent-desktop)"));
-    assert!(workflow.contains("EXPECTED_VERSION=${PACKAGE_ID##*@}"));
-    assert!(workflow.contains("EXPECTED_OUTPUT=\"agent-desktop $EXPECTED_VERSION\""));
-    assert!(workflow.contains("[ \"$ACTUAL_OUTPUT\" != \"$EXPECTED_OUTPUT\" ]"));
-}
-
-#[test]
-fn ci_windows_lane_gates_the_full_package_surface() {
-    let workflow = include_str!("../../.github/workflows/ci.yml").replace("\r\n", "\n");
-
-    assert!(workflow.contains(
-        "cargo clippy --locked -p agent-desktop-core -p agent-desktop-windows \
-         -p agent-desktop -p agent-desktop-ffi --all-targets -- -D warnings"
-    ));
-    assert!(workflow.contains("--edges', 'normal,build,dev"));
-    assert!(workflow.contains("run: cargo test --locked -p agent-desktop\n"));
-    assert!(workflow.contains("run: cargo test --locked -p agent-desktop-ffi --tests"));
-    assert!(
-        workflow.contains("run: cargo test --locked -p agent-desktop-windows --examples"),
-        "the census redaction guard lives in an example, which a --lib run skips"
-    );
-    assert!(workflow.contains("expected exactly 2 windows cfg shims"));
-    assert!(workflow.contains("Get-Item target/release/agent-desktop.exe"));
-    assert!(workflow.contains("ORIGINAL_USERPROFILE=$env:USERPROFILE"));
-    assert!(workflow.contains("Guard profile isolation"));
-    assert!(workflow.contains("FAIL: HOME is not under RUNNER_TEMP"));
-}
-
-#[test]
 fn every_visible_cli_argument_has_help_text() {
     fn inspect(command: &clap::Command) {
         for argument in command

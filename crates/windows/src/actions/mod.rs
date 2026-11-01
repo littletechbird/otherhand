@@ -17,3 +17,4 @@ pub(crate) mod select;
 pub(crate) mod select_search;
 pub(crate) mod toggle_state;
 pub(crate) mod value_write;
+pub(crate) mod verified_type;

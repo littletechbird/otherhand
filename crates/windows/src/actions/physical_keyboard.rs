@@ -13,6 +13,7 @@ use crate::actions::background_keyboard::background_type_steps;
 use crate::actions::physical_target::{
     ensure_keyboard_delivery_ready, ensure_keyboard_policy, focus_lost_before_delivery,
 };
+use crate::actions::verified_type::type_by_set_value;
 use crate::input::keyboard::{preflight_text, synthesize_key, synthesize_text};
 use crate::tree::element::UIAElement;
 
@@ -29,6 +30,11 @@ pub(crate) fn type_text_steps(
         && let Some(steps) = background_type_steps(element, text, deadline)?
     {
         return Ok(steps);
+    }
+    if !text.is_empty()
+        && let Some(step) = type_by_set_value(element, text, deadline)?
+    {
+        return Ok(vec![step]);
     }
     ensure_keyboard_policy(policy)?;
     preflight_text(text, deadline)?;
