@@ -1,0 +1,12 @@
+Otherhand
+Copyright 2026 littletechbird
+
+This product is a modified version of agent-desktop by Vercel Labs,
+https://github.com/vercel-labs/agent-desktop, licensed under the Apache
+License, Version 2.0. The original copyright notices are retained.
+
+Changes in this fork include a strict headless default for Windows with a
+per-command focus guard, a fail-closed exclusion fence with screenshot
+redaction, Dark Room handle-based secret filling, a screen-edge activity
+glow, a local notes folder (the jetpack), and a per-user Windows installer.
+The command line program is renamed otherhand.

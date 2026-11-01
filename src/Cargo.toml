@@ -1,0 +1,93 @@
+[package]
+name      = "agent-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+autotests = false
+
+[dependencies]
+agent-desktop-core.workspace = true
+png                          = { version = "=0.18.1", default-features = false }
+aes                          = "0.8"
+cbc                          = "0.1"
+hmac                         = "0.12"
+sha2                         = "0.10"
+base64.workspace = true
+clap.workspace               = true
+serde.workspace              = true
+serde_json.workspace         = true
+thiserror.workspace          = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+agent-desktop-macos = { path = "../crates/macos" }
+libc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+agent-desktop-windows = { path = "../crates/windows" }
+uiautomation = { version = "0.25", default-features = false, features = ["control"] }
+windows = { version = "0.62.2", features = [
+  "Win32_System_Com",
+  "Win32_System_Variant",
+  "Win32_System_Ole",
+  "Win32_UI_Shell",
+  "Win32_Web_InternetExplorer",
+] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_DataExchange",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_LibraryLoader",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+agent-desktop-linux = { path = "../crates/linux" }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[[bin]]
+name = "agent-desktop"
+path = "main.rs"
+
+[[test]]
+name = "snapshot_test"
+path = "tests/snapshot_test.rs"
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+
+[[test]]
+name = "cli_process"
+path = "tests/cli_process.rs"
+
+[[test]]
+name = "windows_private_file_install"
+path = "tests/windows_private_file_install.rs"
+
+[[test]]
+name = "windows_cursor_overlay_teardown"
+path = "tests/windows_cursor_overlay_teardown.rs"
+
+[[test]]
+name = "command_host_process"
+path = "tests/command_host_process.rs"
+
+[lints]
+workspace = true
