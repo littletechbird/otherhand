@@ -77,7 +77,11 @@ impl ActionOps for CaretAdapter {
         if let Action::TypeText(text) | Action::SetValue(text) = &request.action {
             *self.value.lock().unwrap() = Some(text.clone());
         }
-        Ok(ActionResult::delivered_unverified("type"))
+        Ok(ActionResult::delivered_unverified("type").with_steps(vec![
+            crate::ActionStep::succeeded("fake.type_text")
+                .with_mechanism(crate::StepMechanism::PhysicalSynthetic)
+                .with_verified(true),
+        ]))
     }
 }
 

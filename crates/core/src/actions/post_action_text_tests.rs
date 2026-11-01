@@ -3,7 +3,7 @@ use crate::wait::deadline::VirtualClock;
 use std::time::Duration;
 
 #[test]
-fn normalized_typed_text_is_reported_as_delivered_unverified() {
+fn normalized_typed_text_fails_as_delivered_unverified() {
     for (before, requested, normalized, selection) in [
         ("", "(7+8)*9", "(7+8)×9", None),
         ("", "200*10%", "200×10%", None),
@@ -19,25 +19,17 @@ fn normalized_typed_text_is_reported_as_delivered_unverified() {
                 .with_mechanism(crate::StepMechanism::PhysicalSynthetic)
                 .with_verified(false),
         ]));
-        let result = execute_verified_action(
+        let error = execute_verified_action(
             &adapter,
             &NativeHandle::null(),
             ActionRequest::headed(Action::TypeText(requested.into())),
             &InteractionLease::guarded(Deadline::after(1000).unwrap(), ()).unwrap(),
         )
-        .unwrap();
-        assert_eq!(
-            result.disposition(),
-            DeliverySemantics::delivered_unverified()
-        );
-        assert_eq!(
-            result.details.as_ref().unwrap()["verification_reason"],
-            "postcondition_mismatch"
-        );
-        assert_eq!(
-            result.post_state.unwrap().value.as_deref(),
-            Some(normalized)
-        );
+        .unwrap_err();
+        assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
+        let details = error.details.unwrap();
+        assert_eq!(details["verification_reason"], "postcondition_mismatch");
+        assert_eq!(details["post_state"]["value"], normalized);
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
     }
 }
@@ -61,14 +53,23 @@ fn filling(prefixes: usize) -> std::collections::VecDeque<LiveElement> {
         .collect()
 }
 
-fn type_keys(adapter: &Adapter, budget_ms: u64) -> ActionResult {
+fn try_type_keys(adapter: &Adapter, budget_ms: u64) -> Result<ActionResult, AdapterError> {
     execute_verified_action(
         adapter,
         &NativeHandle::null(),
         ActionRequest::headed(Action::TypeText(TYPED.into())),
         &InteractionLease::guarded(Deadline::after(budget_ms).unwrap(), ()).unwrap(),
     )
-    .unwrap()
+}
+
+fn type_keys(adapter: &Adapter, budget_ms: u64) -> ActionResult {
+    try_type_keys(adapter, budget_ms).unwrap()
+}
+
+fn type_keys_fails(adapter: &Adapter, budget_ms: u64) -> AdapterError {
+    let error = try_type_keys(adapter, budget_ms).unwrap_err();
+    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
+    error
 }
 
 #[test]
@@ -92,19 +93,15 @@ fn keys_still_filling_the_field_after_the_settle_window_are_read_until_the_text_
 }
 
 #[test]
-fn keys_that_keep_changing_the_field_past_the_budget_stay_unverified() {
+fn keys_that_keep_changing_the_field_past_the_budget_fail_unverified() {
     let clock = VirtualClock::freeze();
     let adapter = typed_by_keys_adapter(&TYPED[..1]);
     *adapter.settling.lock().unwrap() = filling(TYPED.len() - 1);
 
-    let result = type_keys(&adapter, 700);
+    let error = type_keys_fails(&adapter, 700);
 
     assert_eq!(
-        result.disposition(),
-        DeliverySemantics::delivered_unverified()
-    );
-    assert_eq!(
-        result.details.unwrap()["verification_reason"],
+        error.details.unwrap()["verification_reason"],
         "postcondition_mismatch"
     );
     assert!(clock.elapsed() <= Duration::from_millis(700));
@@ -115,12 +112,7 @@ fn keys_that_left_the_field_unchanged_are_not_waited_for_until_the_budget_ends()
     let clock = VirtualClock::freeze();
     let adapter = typed_by_keys_adapter(&TYPED[..3]);
 
-    let result = type_keys(&adapter, 5_000);
-
-    assert_eq!(
-        result.disposition(),
-        DeliverySemantics::delivered_unverified()
-    );
+    type_keys_fails(&adapter, 5_000);
     assert!(adapter.reads.lock().unwrap().len() <= 12);
     assert!(clock.elapsed() <= Duration::from_millis(400));
 }

@@ -17,6 +17,24 @@ pub fn bounded_text(value: String) -> PropertyOutcome {
     }
 }
 
+/// Longest `Value` property carried into evidence.
+///
+/// Far above the identity cap, because a text field's value is its content,
+/// not a label: a long article in an editor is still one exact value, and
+/// reading it as `Unknown` is what left live reads, `get` and `find` unable
+/// to answer on a long editor. The cap matches the longest text a readback
+/// assembles, and a value past it is still `Unknown`, never a prefix.
+pub const MAX_VALUE_CHARS: usize = agent_desktop_core::text_delivery::MAX_READBACK_CHARS;
+
+/// [`bounded_text`] for the `Value` property, with [`MAX_VALUE_CHARS`].
+pub fn bounded_value_text(value: String) -> PropertyOutcome {
+    if value.chars().take(MAX_VALUE_CHARS + 1).count() > MAX_VALUE_CHARS {
+        PropertyOutcome::Unknown
+    } else {
+        PropertyOutcome::Known(PropertyValue::Text(value))
+    }
+}
+
 /// Measures one side of a rectangle.
 ///
 /// Saturating, because a provider is free to hand back nonsense and this crate
@@ -200,7 +218,7 @@ mod imp {
         element
             .0
             .get_property_value(uia_property(property))
-            .map(|variant| classify(&variant))
+            .map(|variant| classify(property, &variant))
             .map_err(|error| failed(&error, property, "read an element property"))
     }
 
@@ -218,7 +236,7 @@ mod imp {
         element
             .0
             .get_cached_property_value(uia_property(property))
-            .map(|variant| classify(&variant))
+            .map(|variant| classify(property, &variant))
             .map_err(|error| failed(&error, property, "read a cached element property"))
     }
 
@@ -298,13 +316,16 @@ mod imp {
     /// nothing, which is `Absent`; a variant this reader cannot decode is
     /// `Unknown`, because presenting an undecoded value as identity evidence
     /// is what silently breaks re-identification downstream.
-    fn classify(variant: &Variant) -> PropertyOutcome {
+    fn classify(property: TreeProperty, variant: &Variant) -> PropertyOutcome {
         if is_not_supported(variant) {
             return PropertyOutcome::Absent;
         }
         match variant.get_value() {
             Err(_) => PropertyOutcome::Unknown,
             Ok(Value::EMPTY | Value::NULL | Value::VOID) => PropertyOutcome::Absent,
+            Ok(Value::STRING(text)) if property == TreeProperty::Value => {
+                super::bounded_value_text(text)
+            }
             Ok(Value::STRING(text)) => bounded_text(text),
             Ok(Value::BOOL(flag)) => PropertyOutcome::Known(PropertyValue::Flag(flag)),
             Ok(Value::I4(number) | Value::INT(number)) => {

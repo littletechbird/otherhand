@@ -55,7 +55,11 @@ impl ActionOps for KeyboardAdapter {
     ) -> Result<ActionResult, AdapterError> {
         assert!(matches!(request.action, Action::TypeText(_)));
         self.dispatched.fetch_add(1, Ordering::SeqCst);
-        Ok(ActionResult::delivered_unverified("type"))
+        Ok(ActionResult::delivered_unverified("type").with_steps(vec![
+            crate::ActionStep::succeeded("fake.type_text")
+                .with_mechanism(crate::StepMechanism::PhysicalSynthetic)
+                .with_verified(true),
+        ]))
     }
 }
 

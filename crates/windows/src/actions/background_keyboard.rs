@@ -5,29 +5,38 @@
 //! (`Chrome_WidgetWin_1`) also accepts keyboard input as window messages
 //! once it has been told it is active, which leaves the foreground window
 //! and the physical keyboard alone. The leg activates the window by message,
-//! focuses the target, sends the text, and deactivates it again, unless the
-//! window became the foreground window in the meantime. Any other window
-//! is left to the physical leg, which refuses it under a headless policy.
+//! focuses the target, types, and deactivates it again, unless the window
+//! became the foreground window in the meantime. Any other window is left to
+//! the physical leg, which refuses it under a headless policy.
+//!
+//! A key message that returns has only reached Chromium's browser thread.
+//! The page applies it later, to whichever element has focus by then, and a
+//! busy or background page can apply it much later. So the text goes in
+//! through core's `text_delivery` engine: small chunks, focus on the target
+//! checked before each one, and each one read back from the target before
+//! the next leaves. The step reports success only once every chunk has been
+//! read back and the field has held still.
 
 use std::time::{Duration, Instant};
 
+use agent_desktop_core::text_delivery::{ChunkPolicy, type_in_verified_chunks};
 use agent_desktop_core::{
     ActionStep, AdapterError, Deadline, DeliverySemantics, ErrorCode, StepMechanism,
 };
 
 use crate::actions::background_target as target;
 use crate::actions::physical_target::{ensure_elevation_allows, read_click_bounds};
-use crate::input::keyboard::keyboard_message::{
-    activation_messages, click_messages, text_messages,
-};
+use crate::actions::verified_type::MessageTarget;
+use crate::input::keyboard::keyboard_message::{activation_messages, click_messages};
 use crate::input::keyboard::keyboard_message_send::send_window_messages;
 use crate::input::keyboard::preflight_text;
 use crate::tree::element::UIAElement;
 use crate::tree::live_read::corroborate_verified_process;
+use crate::tree::text_readback::read_target_text;
 
 const TYPE_TEXT_LABEL: &str = "WindowMessage.type_text";
-const FOCUS_BUDGET: Duration = Duration::from_millis(500);
-const CARET_BUDGET: Duration = Duration::from_millis(500);
+const FOCUS_BUDGET: Duration = Duration::from_millis(1_500);
+const CARET_BUDGET: Duration = Duration::from_millis(1_000);
 const DEACTIVATION_BUDGET_MS: u64 = 1_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -56,6 +65,11 @@ pub(crate) fn background_type_steps(
         plan,
         deadline,
         |deadline| focus_target(element, root, deadline),
+        |deadline| {
+            let mut message_target = MessageTarget { element, root };
+            type_in_verified_chunks(&mut message_target, text, ChunkPolicy::default(), deadline)
+                .map(|_| ())
+        },
         || !target::is_foreground(root),
     )
     .map(|step| Some(vec![step]))
@@ -69,17 +83,21 @@ pub(crate) struct BackgroundTypePlan<'a> {
     pub(crate) text: &'a str,
 }
 
-/// The message sequence past the window checks, with target focusing and
-/// the foreground re-read injected so a test drives the same code the
-/// adapter runs. Deactivation is sent whenever activation was, even when a
-/// later step fails or exhausts `deadline`, so the window is never left
-/// believing it is active.
+/// The message sequence past the window checks, with target focusing, the
+/// verified delivery and the foreground re-read injected so a test drives
+/// the same code the adapter runs. `deliver` returns `Ok` only once the text
+/// has been read back from the target, so the step it produces is verified.
+/// Deactivation is sent whenever activation was, even when a later step
+/// fails or exhausts `deadline`, so the window is never left believing it is
+/// active.
 pub(crate) fn type_text_by_messages(
     plan: BackgroundTypePlan<'_>,
     deadline: Deadline,
     focus_target: impl FnOnce(Deadline) -> Result<(), AdapterError>,
+    deliver: impl FnOnce(Deadline) -> Result<(), AdapterError>,
     still_background: impl FnOnce() -> bool,
 ) -> Result<ActionStep, AdapterError> {
+    let _ = plan.text;
     let activate = !plan.was_foreground;
     if activate {
         let activation = activation_messages(true);
@@ -91,24 +109,15 @@ pub(crate) fn type_text_by_messages(
             return Err(stopped_before_text(deadline));
         }
     }
-    let result = focus_target(deadline).and_then(|()| send_text(plan.root, plan.text, deadline));
+    let result = focus_target(deadline).and_then(|()| deliver(deadline));
     if activate && still_background() {
         deactivate(plan.root);
     }
     result.map(|()| {
         ActionStep::succeeded(TYPE_TEXT_LABEL)
             .with_mechanism(StepMechanism::PhysicalSynthetic)
-            .with_verified(false)
+            .with_verified(true)
     })
-}
-
-fn send_text(root: isize, text: &str, deadline: Deadline) -> Result<(), AdapterError> {
-    let messages = text_messages(text);
-    let delivered = send_window_messages(root, &messages, deadline);
-    if delivered < messages.len() {
-        return Err(partial_delivery(delivered, messages.len(), deadline));
-    }
-    Ok(())
 }
 
 /// Runs on its own budget, because a focus or typing step that exhausted
@@ -120,16 +129,13 @@ fn deactivate(root: isize) {
     send_window_messages(root, &activation_messages(false), deadline);
 }
 
-/// Focuses the target with a click message on its center. Chromium handles
-/// the click before the key messages that follow it, because both travel the
-/// same input queue, so no character can reach the element that held focus
-/// before. A field that already holds text then gets the caret at its end
-/// through its UIA text range, once UIA reports keyboard focus on it.
-/// Chromium applies that selection on another channel than input messages,
-/// so the leg waits until no text follows the caret before it types. A page
-/// that a covering window has hidden can report focus late; when focus or
-/// the caret cannot be confirmed in time, the text goes in at the click
-/// point.
+/// Focuses the target with a click message on its center, then requires
+/// UIA to report keyboard focus on the target itself before anything is
+/// typed. A field that already holds text then gets the caret at its end
+/// through its UIA text range, and that too has to be confirmed. Either one
+/// failing refuses the command with nothing typed: typing at an unconfirmed
+/// point is how text ended up spliced into the middle of an earlier
+/// paragraph, or in a different field altogether.
 fn focus_target(element: &UIAElement, root: isize, deadline: Deadline) -> Result<(), AdapterError> {
     let bounds = read_click_bounds(element)?;
     let center_x = (bounds.x + bounds.width / 2.0).round() as i32;
@@ -143,8 +149,17 @@ fn focus_target(element: &UIAElement, root: isize, deadline: Deadline) -> Result
     let focused = wait_until(deadline, FOCUS_BUDGET, || {
         target::has_keyboard_focus(element)
     });
-    if focused && target::holds_text(element) && target::select_end_of_text(element) {
-        wait_until(deadline, CARET_BUDGET, || target::caret_at_end(element));
+    if !focused {
+        return Err(focus_not_confirmed());
+    }
+    let holds_text = read_target_text(element, deadline)?
+        .is_some_and(|text| !text.is_empty() && Some(text) != target::element_name(element));
+    if holds_text {
+        let at_end = target::select_end_of_text(element)
+            && wait_until(deadline, CARET_BUDGET, || target::caret_at_end(element));
+        if !at_end {
+            return Err(caret_not_confirmed());
+        }
     }
     Ok(())
 }
@@ -160,6 +175,24 @@ fn wait_until(deadline: Deadline, budget: Duration, mut ready: impl FnMut() -> b
         }
         std::thread::sleep(POLL_INTERVAL.min(deadline.remaining()));
     }
+}
+
+fn focus_not_confirmed() -> AdapterError {
+    AdapterError::new(
+        ErrorCode::FocusStolen,
+        "Keyboard focus could not be confirmed on the target, so nothing was typed",
+    )
+    .with_suggestion("Run 'focus' on the ref and check it reports focused, then retry.")
+    .with_disposition(DeliverySemantics::not_delivered())
+}
+
+fn caret_not_confirmed() -> AdapterError {
+    AdapterError::new(
+        ErrorCode::ActionFailed,
+        "The caret could not be moved to the end of the field's text, so nothing was typed",
+    )
+    .with_suggestion("Click at the end of the text with a headed click, then retry.")
+    .with_disposition(DeliverySemantics::not_delivered())
 }
 
 fn minimized_window() -> AdapterError {
@@ -187,20 +220,6 @@ fn stopped_before_text(deadline: Deadline) -> AdapterError {
             .with_disposition(DeliverySemantics::not_delivered());
     }
     window_unresponsive()
-}
-
-fn partial_delivery(delivered: usize, planned: usize, deadline: Deadline) -> AdapterError {
-    let disposition = if delivered == 0 {
-        DeliverySemantics::not_delivered()
-    } else {
-        DeliverySemantics::delivered_unverified()
-    };
-    stopped_before_text(deadline)
-        .with_details(serde_json::json!({
-            "delivered_messages": delivered,
-            "planned_messages": planned,
-        }))
-        .with_disposition(disposition)
 }
 
 #[cfg(all(test, target_os = "windows"))]

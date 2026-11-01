@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* Stop `type` from reporting success when the text never landed. It now fails with `delivered_unverified` whenever the field cannot be read back with the typed text in it.
+* On Windows, type into Chromium and Electron fields in small chunks, with focus checked on the target before each chunk and the field read back after each one, so text can no longer land in another field or turn up minutes later.
+* On Windows, require keyboard focus and the caret to be confirmed on the target before typing into a Chromium field, instead of typing wherever the click left the caret.
+* On Windows, type into native fields that have a writable value by `SetValue` and read the value back.
+* On Windows, read values up to 200,000 characters and read rich editors' text through `TextPattern` a page at a time, so `get`, `focus` and `find` work on long editors.
+
 ## [1.0.2](https://github.com/vercel-labs/agent-desktop/compare/v1.0.1...v1.0.2) (2026-10-30)
 
 ### Features

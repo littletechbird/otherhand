@@ -2,9 +2,8 @@
 //! `background_keyboard`: whether the target lives in a Chromium top-level
 //! window, that window's state, and the target's focus and caret.
 //!
-//! The emptiness check reads `ValuePattern`, not the text range: Chromium
-//! answers an empty field's document range with the field's accessible
-//! name. A password field is never read and counts as empty.
+//! A password field's value is never read. The field's full text for
+//! verification comes from `tree::text_readback`.
 
 #[cfg(target_os = "windows")]
 mod imp {
@@ -101,15 +100,37 @@ mod imp {
         element.0.has_keyboard_focus().unwrap_or(false)
     }
 
-    pub(crate) fn holds_text(element: &UIAElement) -> bool {
+    /// The `ValuePattern` value of a field that is not a password field.
+    pub(crate) fn pattern_value(element: &UIAElement) -> Option<String> {
         if element.0.is_password().unwrap_or(true) {
-            return false;
+            return None;
         }
         element
             .0
             .get_pattern::<UIValuePattern>()
             .and_then(|pattern| pattern.get_value())
-            .is_ok_and(|value| !value.is_empty())
+            .ok()
+    }
+
+    pub(crate) fn element_name(element: &UIAElement) -> Option<String> {
+        element.0.get_name().ok()
+    }
+
+    /// Whether the element advertises a `ValuePattern` that is not read-only.
+    pub(crate) fn value_writable(element: &UIAElement) -> bool {
+        use crate::tree::properties::property_ids::TreeProperty;
+        use crate::tree::properties::read_one;
+        read_one(element, TreeProperty::ValueAvailable).flag() == Some(true)
+            && read_one(element, TreeProperty::ValueIsReadOnly).flag() == Some(false)
+    }
+
+    /// Writes a `ValuePattern` value, answering whether the provider took it.
+    pub(crate) fn set_pattern_value(element: &UIAElement, value: &str) -> bool {
+        element
+            .0
+            .get_pattern::<UIValuePattern>()
+            .and_then(|pattern| pattern.set_value(value))
+            .is_ok()
     }
 
     pub(crate) fn select_end_of_text(element: &UIAElement) -> bool {
@@ -182,7 +203,19 @@ mod imp {
         false
     }
 
-    pub(crate) fn holds_text(_element: &UIAElement) -> bool {
+    pub(crate) fn pattern_value(_element: &UIAElement) -> Option<String> {
+        None
+    }
+
+    pub(crate) fn set_pattern_value(_element: &UIAElement, _value: &str) -> bool {
+        false
+    }
+
+    pub(crate) fn element_name(_element: &UIAElement) -> Option<String> {
+        None
+    }
+
+    pub(crate) fn value_writable(_element: &UIAElement) -> bool {
         false
     }
 
@@ -196,6 +229,6 @@ mod imp {
 }
 
 pub(crate) use imp::{
-    caret_at_end, chromium_root, has_keyboard_focus, holds_text, is_foreground, is_minimized,
-    screen_to_client, select_end_of_text,
+    caret_at_end, chromium_root, element_name, has_keyboard_focus, is_foreground, is_minimized,
+    pattern_value, screen_to_client, select_end_of_text, set_pattern_value, value_writable,
 };

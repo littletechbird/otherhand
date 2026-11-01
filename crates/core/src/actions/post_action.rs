@@ -92,13 +92,18 @@ pub fn execute_verified_action(
             return Err(error);
         }
     };
+    if typed_and_read_back(&action, &result) {
+        let observed = observed.ok();
+        return Ok(readback_verified(result, observed));
+    }
     let observed = observed.map_err(|error| verification_error(&result, None, error))?;
     let verified = matches_postcondition(
         &action,
         before.as_ref(),
         expected_text.as_deref(),
         &observed,
-    );
+    )
+    .or_else(|| typed_text_contained(&action, before.as_ref(), &observed));
     let physical_text_mismatch = verified == Some(false) && typed_by_keys(&action, &result);
     if verified.is_none() || physical_text_mismatch {
         let reason = if physical_text_mismatch {
@@ -108,6 +113,9 @@ pub fn execute_verified_action(
         } else {
             "insufficient_evidence"
         };
+        if matches!(action, Action::TypeText(_)) && reason != "secure_field" {
+            return Err(unverified_type_error(&result, &observed, reason));
+        }
         result.post_state = Some(observed.state);
         result = result.with_unverified_delivery();
         let details = result.details.get_or_insert_with(|| serde_json::json!({}));
@@ -136,6 +144,70 @@ pub fn execute_verified_action(
         }
     }
     Ok(result)
+}
+
+/// Whether the adapter already read the typed text back from the target
+/// chunk by chunk (see `text_delivery`). Such a step is the strongest
+/// evidence there is, so it is not second-guessed by a single-value read
+/// that a long or rich editor may not be able to answer.
+fn typed_and_read_back(action: &Action, result: &ActionResult) -> bool {
+    matches!(action, Action::TypeText(_))
+        && result.steps.iter().any(|step| {
+            matches!(&step.outcome, crate::ActionStepOutcome::Succeeded)
+                && step.mechanism().is_some()
+                && step.verified() == Some(true)
+        })
+}
+
+fn readback_verified(mut result: ActionResult, observed: Option<LiveElement>) -> ActionResult {
+    result.post_state = observed.map(|observed| observed.state);
+    result = result.with_verified_delivery();
+    let details = result.details.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(details) = details.as_object_mut() {
+        details.insert("verification_scope".into(), "text_readback".into());
+        details.insert("application_commit".into(), "not_verified".into());
+    }
+    result
+}
+
+/// A weaker check for when the caret position was unknown before typing,
+/// as in a rich editor whose selection cannot be read: the typed text must
+/// now appear in the value, as one run, more often than it did before.
+fn typed_text_contained(
+    action: &Action,
+    before: Option<&LiveElement>,
+    observed: &LiveElement,
+) -> Option<bool> {
+    let Action::TypeText(text) = action else {
+        return None;
+    };
+    let before = before?.state.value.as_deref()?;
+    let after = observed.state.value.as_deref()?;
+    crate::text_delivery::landed(before, after, text).then_some(true)
+}
+
+/// `type` never reports success it could not check. A field that read back
+/// without the typed text, or could not be read at all, fails here with
+/// `delivered_unverified`, so a caller cannot mistake it for a pass.
+fn unverified_type_error(
+    result: &ActionResult,
+    observed: &LiveElement,
+    reason: &str,
+) -> AdapterError {
+    let message = if reason == "postcondition_mismatch" {
+        "Typed text did not show up in the field as requested"
+    } else {
+        "Typed text could not be read back from the field, so it is not known to have landed"
+    };
+    let error = AdapterError::new(ErrorCode::ActionFailed, message)
+        .with_suggestion(
+            "Read the field with 'get' to see what landed. Some Chromium and Electron fields accept \
+             keys without applying them; write the full value with 'set-value' instead.",
+        )
+        .with_details(serde_json::json!({ "verification_reason": reason }));
+    let mut error = verification_error(result, Some(observed), error);
+    error.disposition = DeliverySemantics::delivered_unverified();
+    error
 }
 
 /// Keys sent to a field reach it through the application's event queue, so

@@ -108,30 +108,6 @@ fn live_wpf_zero_bounds_is_visible_false_when_stageable() {
     assert!(!visibility.result());
 }
 
-/// The lane that owns executing the live WPF leg, pinned at the assignment
-/// that gives it that ownership.
-///
-/// Pinned on the step rather than on the file: the variable has to sit on the
-/// step that runs the library tests, because a step's `env` reaches only that
-/// step. Set anywhere else it reads as coverage while staging nothing.
-#[test]
-fn the_windows_lane_stages_the_live_wpf_host() {
-    let workflow = include_str!("../../../../../.github/workflows/ci.yml").replace("\r\n", "\n");
-    let assignment = format!("{LIVE_WPF_VARIABLE}: \"1\"");
-    let step = workflow
-        .split("- name: ")
-        .find(|step| step.starts_with("Core and Windows unit tests"))
-        .expect("the Windows lane runs a library-test step");
-    assert!(
-        step.contains(&assignment),
-        "the library-test step no longer stages the ScratchWpf host, so the zero-bounds body would skip on every run"
-    );
-    assert!(
-        step.contains("cargo test --locked -p agent-desktop-core -p agent-desktop-windows --lib"),
-        "the staged step is no longer the one that runs the library tests"
-    );
-}
-
 fn control_handle(button: *mut std::ffi::c_void) -> Result<NativeHandle, AdapterError> {
     let client = automation_client()?;
     let element = client

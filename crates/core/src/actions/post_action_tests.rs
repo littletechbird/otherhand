@@ -272,18 +272,26 @@ fn secure_field_redaction_does_not_hide_delivery_errors() {
 }
 
 #[test]
-fn missing_selection_does_not_turn_delivered_text_into_a_failure() {
+fn missing_selection_is_verified_when_the_typed_text_is_now_in_the_value() {
     let adapter = adapter(element(Some("old"), &[]), element(Some("oldnew"), &[]));
     let result = execute(&adapter, Action::TypeText("new".into())).unwrap();
     assert_eq!(
         result.disposition(),
-        DeliverySemantics::delivered_unverified()
-    );
-    assert_eq!(
-        result.details.unwrap()["verification_reason"],
-        "insufficient_evidence"
+        DeliverySemantics::delivered_verified()
     );
     assert_eq!(adapter.reads.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn missing_selection_and_no_new_text_fails_instead_of_passing() {
+    let adapter = adapter(element(Some("old"), &[]), element(Some("old"), &[]));
+    let error = execute(&adapter, Action::TypeText("new".into())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::ActionFailed);
+    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
+    assert_eq!(
+        error.details.unwrap()["verification_reason"],
+        "insufficient_evidence"
+    );
 }
 
 #[test]
@@ -317,27 +325,43 @@ fn numeric_coercion_is_verified_by_live_readback() {
 }
 
 #[test]
-fn missing_before_evidence_does_not_block_or_repeat_headed_or_headless_delivery() {
+fn missing_before_evidence_fails_once_without_repeating_delivery() {
     for request in [
         ActionRequest::headless(Action::TypeText("new".into())),
         ActionRequest::headed(Action::TypeText("new".into())),
     ] {
         let mut adapter = adapter(element(Some(""), &[]), element(Some("new"), &[]));
         adapter.before = Err(AdapterError::timeout("before read"));
-        let result = execute_verified_action(
+        let error = execute_verified_action(
             &adapter,
             &NativeHandle::null(),
             request,
             &InteractionLease::guarded(Deadline::after(1000).unwrap(), ()).unwrap(),
         )
-        .unwrap();
-        assert_eq!(
-            result.disposition(),
-            DeliverySemantics::delivered_unverified()
-        );
+        .unwrap_err();
+        assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.reads.lock().unwrap().len(), 2);
     }
+}
+
+#[test]
+fn a_step_already_verified_by_readback_is_reported_verified() {
+    let mut adapter = adapter(element(None, &[]), element(None, &[]));
+    adapter.execution = Ok(ActionResult::delivered_unverified("type").with_steps(vec![
+        crate::ActionStep::succeeded("WindowMessage.type_text")
+            .with_mechanism(crate::StepMechanism::PhysicalSynthetic)
+            .with_verified(true),
+    ]));
+    let result = execute(&adapter, Action::TypeText("long article".into())).unwrap();
+    assert_eq!(
+        result.disposition(),
+        DeliverySemantics::delivered_verified()
+    );
+    assert_eq!(
+        result.details.unwrap()["verification_scope"],
+        "text_readback"
+    );
 }
 
 #[test]

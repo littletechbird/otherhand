@@ -80,14 +80,41 @@ mod imp {
         let outside_visible_area =
             crate::tree::minimized::owning_window_minimized(element, deadline).unwrap_or(false)
                 || crate::tree::minimized::outside_scroll_viewports(element, deadline)?;
-        read_live_element_core(
+        let mut read = read_live_element_core(
             element,
             deadline,
             outside_visible_area,
             corroborate_verified_process,
             |element| read_live_bounded(element, deadline),
             |element| read_label(element, false),
-        )
+        )?;
+        fill_text_from_text_pattern(element, &mut read, deadline);
+        Ok(read)
+    }
+
+    /// A rich web editor often has no `ValuePattern`, or one that answers
+    /// empty, while its `TextPattern` holds the whole document. For a role
+    /// whose value is its readable text, that text is read a page at a time
+    /// and becomes the value, so `get`, `focus` and post-action checks can
+    /// see what the editor holds. A secure field is never read.
+    fn fill_text_from_text_pattern(element: &UIAElement, read: &mut LiveRead, deadline: Deadline) {
+        use agent_desktop_core::LocatorField;
+        let readable_role = read.evidence.role.known().is_some_and(|role| {
+            agent_desktop_core::tree::role_text::value_is_the_readable_text(role)
+        });
+        let empty = match &read.evidence.value {
+            LocatorField::Absent => true,
+            LocatorField::Known(value) => value.is_empty(),
+            LocatorField::Unknown => false,
+        };
+        if !readable_role || !empty || read.properties.is_secure() {
+            return;
+        }
+        if let Ok(Some(text)) = crate::tree::text_readback::read_target_text(element, deadline)
+            && !text.is_empty()
+        {
+            read.evidence.value = LocatorField::Known(text);
+        }
     }
 
     /// The read's body, generic over how process-instance corroboration and

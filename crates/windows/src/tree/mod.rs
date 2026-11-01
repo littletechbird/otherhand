@@ -13,6 +13,7 @@ pub mod states;
 pub(crate) mod surface_inventory;
 pub mod surfaces;
 pub(crate) mod text_insertion;
+pub(crate) mod text_readback;
 pub(crate) mod text_selection;
 pub mod walk;
 
