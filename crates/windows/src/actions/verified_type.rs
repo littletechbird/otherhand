@@ -25,6 +25,9 @@ use crate::input::keyboard::keyboard_message_send::send_window_messages;
 use crate::tree::element::UIAElement;
 use crate::tree::text_readback::read_target_text;
 
+/// Characters sent between focus checks inside one chunk.
+const FOCUS_CHECK_CHARS: usize = 4;
+
 const SET_VALUE_LABEL: &str = "ValuePattern.SetValue.type_text";
 const SET_VALUE_SETTLE: Duration = Duration::from_millis(500);
 const STOP_BUDGET_MS: u64 = 1_000;
@@ -41,18 +44,34 @@ impl ChunkTarget for MessageTarget<'_> {
         Ok(target::has_keyboard_focus(self.element))
     }
 
+    /// Sends the chunk a few characters at a time and checks focus between
+    /// slices. The page applies keys to whatever holds focus when they reach
+    /// it, so a focus change found only after the whole chunk would let the
+    /// rest of the chunk land somewhere else.
     fn send(&mut self, chunk: &str, deadline: Deadline) -> Result<(), AdapterError> {
-        let messages = text_messages(chunk);
-        let delivered = send_window_messages(self.root, &messages, deadline);
-        if delivered < messages.len() {
-            return Err(AdapterError::new(
-                ErrorCode::AppUnresponsive,
-                "The window stopped accepting key messages",
-            )
-            .with_details(serde_json::json!({
-                "delivered_messages": delivered,
-                "planned_messages": messages.len(),
-            })));
+        let mut sent_chars = 0_usize;
+        for slice in focus_check_slices(chunk) {
+            if sent_chars > 0 && !target::has_keyboard_focus(self.element) {
+                return Err(AdapterError::new(
+                    ErrorCode::FocusStolen,
+                    "Keyboard focus left the target while a chunk was being sent",
+                )
+                .with_details(serde_json::json!({ "chars_sent_in_chunk": sent_chars })));
+            }
+            let messages = text_messages(slice);
+            let delivered = send_window_messages(self.root, &messages, deadline);
+            if delivered < messages.len() {
+                return Err(AdapterError::new(
+                    ErrorCode::AppUnresponsive,
+                    "The window stopped accepting key messages",
+                )
+                .with_details(serde_json::json!({
+                    "delivered_messages": delivered,
+                    "planned_messages": messages.len(),
+                    "chars_sent_in_chunk": sent_chars,
+                })));
+            }
+            sent_chars += slice.chars().count();
         }
         Ok(())
     }
@@ -125,3 +144,29 @@ pub(crate) fn type_by_set_value(
         std::thread::sleep(POLL.min(deadline.remaining()));
     }
 }
+
+/// Splits a chunk into slices of about [`FOCUS_CHECK_CHARS`] characters,
+/// never between a CR and the LF after it, which type as one line break.
+fn focus_check_slices(chunk: &str) -> Vec<&str> {
+    let mut slices = Vec::new();
+    let mut start = 0;
+    let mut count = 0;
+    let mut previous = '\0';
+    for (index, character) in chunk.char_indices() {
+        if count >= FOCUS_CHECK_CHARS && !(previous == '\r' && character == '\n') {
+            slices.push(&chunk[start..index]);
+            start = index;
+            count = 0;
+        }
+        count += 1;
+        previous = character;
+    }
+    if start < chunk.len() {
+        slices.push(&chunk[start..]);
+    }
+    slices
+}
+
+#[cfg(test)]
+#[path = "verified_type_tests.rs"]
+mod tests;

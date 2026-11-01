@@ -41,9 +41,16 @@ mod imp {
         let text = read_paged(DEFAULT_PAGE_CHARS, MAX_READBACK_CHARS, deadline, |page| {
             next_page(&pattern, &mut offset, page)
         })?;
-        let name = element.0.get_name().unwrap_or_default();
-        if !text.is_empty() && text == name && value.as_deref().is_none_or(str::is_empty) {
-            return Ok(Some(String::new()));
+        // Chromium's TextPattern reads an empty field's label or placeholder
+        // as its text. A field whose ValuePattern says empty, and whose text
+        // is only its name or its help text (where Chromium puts the
+        // placeholder), holds nothing.
+        if !text.is_empty() && value.as_deref().is_none_or(str::is_empty) {
+            let name = element.0.get_name().unwrap_or_default();
+            let help = element.0.get_help_text().unwrap_or_default();
+            if text == name || (value.is_some() && text == help) {
+                return Ok(Some(String::new()));
+            }
         }
         Ok(Some(text))
     }

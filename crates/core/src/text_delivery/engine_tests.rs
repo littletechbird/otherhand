@@ -18,6 +18,7 @@ struct FakeEditor {
     reads_since_send: usize,
     stall_after_chars: Option<usize>,
     focus_moves_after_sends: Option<usize>,
+    focus_lost_during_send: Option<usize>,
     late_key_on_read: Option<(usize, char)>,
     rich_rewrite: bool,
     readable: bool,
@@ -72,6 +73,14 @@ impl ChunkTarget for FakeEditor {
     fn send(&mut self, chunk: &str, _deadline: Deadline) -> Result<(), AdapterError> {
         let focused = self.has_focus();
         self.sends += 1;
+        if self.focus_lost_during_send == Some(self.sends) {
+            let half: String = chunk.chars().take(chunk.chars().count() / 2).collect();
+            self.text.push_str(&half);
+            return Err(AdapterError::new(
+                ErrorCode::FocusStolen,
+                "focus left mid-chunk",
+            ));
+        }
         if !focused {
             self.other_field.push_str(chunk);
             return Ok(());
@@ -201,6 +210,19 @@ fn focus_moving_to_another_field_stops_typing_before_the_next_chunk() {
         "text went into the wrong field"
     );
     assert_eq!(editor.sends, 3);
+}
+
+#[test]
+fn focus_lost_inside_a_chunk_is_reported_as_focus_moved() {
+    let _clock = VirtualClock::freeze();
+    let mut editor = FakeEditor::new();
+    editor.focus_lost_during_send = Some(2);
+    let error = run(&mut editor, &article(100)).unwrap_err();
+    assert_eq!(reason(&error), "focus_moved");
+    assert_eq!(error.code, ErrorCode::FocusStolen);
+    assert_eq!(error.disposition, DeliverySemantics::delivered_unverified());
+    assert_eq!(editor.sends, 2);
+    assert!(editor.stops >= 1, "pending input was not stopped");
 }
 
 #[test]

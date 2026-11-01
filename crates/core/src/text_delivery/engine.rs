@@ -16,7 +16,9 @@ pub const TYPE_NOT_VERIFIED_KIND: &str = "type_not_verified";
 pub trait ChunkTarget {
     /// Whether keyboard focus is on the target element right now.
     fn focus_on_target(&mut self) -> Result<bool, AdapterError>;
-    /// Sends one chunk. An `Err` means some of it may have been sent.
+    /// Sends one chunk. An `Err` means some of it may have been sent. An
+    /// `Err` with [`ErrorCode::FocusStolen`] means the sender saw focus leave
+    /// the target part way through the chunk and stopped there.
     fn send(&mut self, chunk: &str, deadline: Deadline) -> Result<(), AdapterError>;
     /// The target's whole current text, or `None` when it cannot be read.
     fn read_back(&mut self, deadline: Deadline) -> Result<Option<String>, AdapterError>;
@@ -134,6 +136,9 @@ pub fn type_in_verified_chunks(
         progress.sent_unverified = true;
         if let Err(error) = target.send(chunk, deadline) {
             target.stop_pending_input();
+            if error.code == ErrorCode::FocusStolen {
+                return Err(failure(Reason::FocusMoved, &progress, Some(error)));
+            }
             return Err(failure(Reason::SendFailed, &progress, Some(error)));
         }
         typed.push_str(chunk);

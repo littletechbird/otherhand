@@ -152,8 +152,12 @@ fn focus_target(element: &UIAElement, root: isize, deadline: Deadline) -> Result
     if !focused {
         return Err(focus_not_confirmed());
     }
-    let holds_text = read_target_text(element, deadline)?
-        .is_some_and(|text| !text.is_empty() && Some(text) != target::element_name(element));
+    // A field whose ValuePattern reads empty has no text to type after, so
+    // the caret is already where the text belongs.
+    let value_empty = target::pattern_value(element).is_some_and(|value| value.is_empty());
+    let holds_text = !value_empty
+        && read_target_text(element, deadline)?
+            .is_some_and(|text| !text.is_empty() && Some(text) != target::element_name(element));
     if holds_text {
         let at_end = target::select_end_of_text(element)
             && wait_until(deadline, CARET_BUDGET, || target::caret_at_end(element));
