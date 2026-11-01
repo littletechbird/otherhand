@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AB Editor</title>
+<style>
+  body { font-family: Segoe UI, sans-serif; margin: 24px; }
+  #body { min-height: 300px; border: 1px solid #888; padding: 8px; white-space: pre-wrap; }
+  #title, #decoy { width: 600px; font-size: 16px; }
+  #status { color: #555; font-size: 12px; }
+</style>
+</head>
+<body>
+<p><input id="title" aria-label="Article title" placeholder="Title"></p>
+<div id="body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Article body"></div>
+<p><input id="decoy" aria-label="Decoy field" placeholder="Nothing should land here"></p>
+<p id="status" aria-label="Status">idle</p>
+<script>
+  // Test page for the A/B harness. Query options:
+  //   steal=MS   move focus from the body to the decoy field MS after the first key
+  //   lag=MS     handle every key MS late, like a busy page
+  const params = new URLSearchParams(location.search);
+  const steal = Number(params.get('steal') || 0);
+  const lag = Number(params.get('lag') || 0);
+  const body = document.getElementById('body');
+  const decoy = document.getElementById('decoy');
+  const status = document.getElementById('status');
+  let first = 0;
+  let keys = 0;
+  function note() {
+    status.textContent = 'keys ' + keys + ' last ' + Date.now();
+  }
+  body.addEventListener('keydown', () => {
+    keys += 1;
+    if (!first) {
+      first = Date.now();
+      if (steal > 0) setTimeout(() => decoy.focus(), steal);
+    }
+    note();
+  });
+  if (lag > 0) {
+    body.addEventListener('beforeinput', (event) => {
+      if (!event.data) return;
+      event.preventDefault();
+      const data = event.data;
+      setTimeout(() => {
+        body.focus();
+        document.execCommand('insertText', false, data);
+        note();
+      }, lag);
+    });
+  }
+  body.focus();
+</script>
+</body>
+</html>
