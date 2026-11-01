@@ -54,6 +54,7 @@ function Normalize([string]$text) {
 }
 
 function Invoke-Tool([string]$exe, [string[]]$arguments) {
+    $ErrorActionPreference = 'Continue'
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $raw = & $exe @arguments 2>&1 | Out-String
     $code = $LASTEXITCODE
@@ -63,13 +64,18 @@ function Invoke-Tool([string]$exe, [string[]]$arguments) {
     [pscustomobject]@{ ok = $ok; exit = $code; ms = $watch.ElapsedMilliseconds; raw = $raw.Trim() }
 }
 
-function Find-Ref([string]$exe, [string]$app, [string]$name, [string]$role) {
-    $arguments = @('find', '--app', $app, '--first')
-    if ($name) { $arguments += @('--name', $name) }
-    if ($role) { $arguments += @('--role', $role) }
-    $result = Invoke-Tool $exe $arguments
-    $match = [regex]::Match($result.raw, '"ref"\s*:\s*"(@[^"]+)"')
-    if ($match.Success) { return $match.Groups[1].Value }
+$script:findLog = ''
+function Find-Ref([string]$exe, [string[]]$apps, [string]$name, [string]$role) {
+    $script:findLog = ''
+    foreach ($app in $apps) {
+        $arguments = @('find', '--app', $app, '--first')
+        if ($name) { $arguments += @('--name', $name) }
+        if ($role) { $arguments += @('--role', $role) }
+        $result = Invoke-Tool $exe $arguments
+        $script:findLog += "find --app $app (exit $($result.exit)) => $($result.raw)`n"
+        $match = [regex]::Match($result.raw, '"ref(?:_id)?"\s*:\s*"(@[^"]+)"')
+        if ($match.Success) { return $match.Groups[1].Value }
+    }
     $null
 }
 
@@ -184,11 +190,11 @@ function Invoke-Run([string]$toolName, [string]$exe, [string]$task, [int]$run) {
     $userWindow = [AbWin32]::GetForegroundWindow()
     if ($task -eq 'short_notepad') {
         $target = Find-Uia $null $null 'notepad'
-        $ref = Find-Ref $exe 'Notepad' $null 'textfield'
-        if (-not $ref) { $ref = Find-Ref $exe 'Notepad' $null 'document' }
+        $ref = Find-Ref $exe @('notepad', 'Notepad') 'Text Editor' $null
+        if (-not $ref) { $ref = Find-Ref $exe @('notepad', 'Notepad') $null 'textfield' }
     } else {
         $target = Find-Uia '*AB Editor*' $targetName $null
-        $ref = Find-Ref $exe $appName $targetName $null
+        $ref = Find-Ref $exe @('msedge', 'Microsoft Edge') $targetName $null
     }
     $decoy = Find-Uia '*AB Editor*' 'Decoy field' $null
     $before = Normalize (Read-Uia $target)
@@ -199,8 +205,18 @@ function Invoke-Run([string]$toolName, [string]$exe, [string]$task, [int]$run) {
     $cursor = Start-CursorWatch
     if ($ref) {
         $result = Invoke-Tool $exe @('type', $ref, $text, '--timeout-ms', "$TypeTimeoutMs")
+        $headed = $false
+        if (-not $result.ok -and $result.raw -match '"code"\s*:\s*"POLICY_DENIED"') {
+            # Strict headless mode refused; give both tools the same second
+            # chance with physical delivery allowed, as a user would.
+            $headed = $true
+            $first = $result.raw
+            $result = Invoke-Tool $exe @('--headed', 'type', $ref, $text, '--timeout-ms', "$TypeTimeoutMs")
+            $result.raw = "headless attempt: $first`nheaded attempt: $($result.raw)"
+        }
     } else {
-        $result = [pscustomobject]@{ ok = $false; exit = -1; ms = 0; raw = 'find returned no ref' }
+        $headed = $false
+        $result = [pscustomobject]@{ ok = $false; exit = -1; ms = 0; raw = "find returned no ref`n$script:findLog" }
     }
     $foregroundAfter = [AbWin32]::GetForegroundWindow()
     $cursorMoved = Stop-CursorWatch $cursor
@@ -211,7 +227,8 @@ function Invoke-Run([string]$toolName, [string]$exe, [string]$task, [int]$run) {
     $expected = Normalize ($before + ' ' + $text)
     $landed = ($landedText -eq (Normalize $text)) -or ($landedText -eq $expected)
     $stray = $false
-    if ($decoy) { $stray = (Normalize (Read-Uia $decoy)).Length -gt 0 }
+    $strayChars = 0
+    if ($decoy) { $strayChars = (Normalize (Read-Uia $decoy)).Length; $stray = $strayChars -gt 0 }
     if ($task -eq 'foreground_theft') {
         $thiefEdit = Find-Uia $null $null 'notepad'
         if ($thiefEdit -and (Normalize (Read-Uia $thiefEdit)).Length -gt 0) { $stray = $true }
@@ -228,7 +245,7 @@ function Invoke-Run([string]$toolName, [string]$exe, [string]$task, [int]$run) {
     if ($verdict -eq 'PASS' -and $cursorMoved) { $verdict = 'FAIL'; $reason = 'the mouse cursor moved' }
     $record = [pscustomobject]@{
         tool = $toolName; task = $task; run = $run; verdict = $verdict; reason = $reason
-        tool_ok = $result.ok; landed = $landed; stray = $stray; late_keys = $late
+        tool_ok = $result.ok; headed_retry = $headed; landed = $landed; stray = $stray; stray_chars = $strayChars; late_keys = $late
         cursor_moved = $cursorMoved; foreground_kept = $foregroundKept; ms = $result.ms
         chars_expected = (Normalize $text).Length; chars_seen = $landedText.Length
     }
