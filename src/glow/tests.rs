@@ -17,6 +17,7 @@ fn the_default_is_on_and_soft_cyan() {
     let cfg = config_from(None);
     assert!(cfg.enabled);
     assert_eq!(cfg.color, 0x00D4FF);
+    assert_eq!(cfg.thickness, 12);
     assert_eq!(cfg.linger_ms, 1_500);
     assert_eq!(config_from(Some(&json!({}))), GlowConfig::default());
 }

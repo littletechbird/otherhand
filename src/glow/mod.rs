@@ -31,7 +31,7 @@
 //! Settings live in `<profile>\.otherhand\config.json`:
 //!
 //! ```json
-//! { "glow": { "enabled": true, "color": "#00D4FF", "thickness": 6, "linger_ms": 1500,
+//! { "glow": { "enabled": true, "color": "#00D4FF", "thickness": 12, "linger_ms": 1500,
 //!             "require_capture_exclusion": false } }
 //! ```
 //!
@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub(crate) const DEFAULT_COLOR: u32 = 0x00D4FF;
-pub(crate) const DEFAULT_THICKNESS: u32 = 6;
+pub(crate) const DEFAULT_THICKNESS: u32 = 12;
 pub(crate) const DEFAULT_LINGER_MS: u64 = 1_500;
 /// One full pulse, dim to bright and back.
 pub(crate) const PULSE_PERIOD_MS: u64 = 1_600;
