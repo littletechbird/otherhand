@@ -105,8 +105,8 @@ if (Test-Path $config) {
     ConvertTo-Json -Depth 3 | Set-Content -Encoding ASCII -Path $config
   Say "Wrote your settings: $config"
 }
-Say '  While Otherhand acts, a soft cyan glow frames your screens. Change its color or turn it off in that file'
-Say '  ("glow": { "enabled": false }), or add --no-glow to a single command.'
+Say '  While Otherhand acts, a soft cyan glow frames your screens. Ask the agent to change it, or run'
+Say '  otherhand glow show / glow set / glow reset. --no-glow turns it off for one command.'
 
 # 4. Optional: PATH for this account only.
 if ($AddToPath) {
@@ -136,6 +136,14 @@ Every command prints one JSON object; check ``ok`` and ``error.code``.
   the person says so.
 - ``FENCED`` means the person keeps that app, window or folder private. Do not try another way in.
 - Fill secrets only with ``otherhand fill-secret <ref> <dr_sec_ handle>``. Never ask for, type or store the secret itself.
+- When the person talks about the screen-edge glow, change it with ``otherhand glow`` and do not edit the config file by hand.
+  ``otherhand glow show`` prints the saved settings. ``otherhand glow set`` writes one or more of
+  ``--on``, ``--off``, ``--thickness N`` (2-24, default 12), ``--color #RRGGBB``, ``--colors #A,#B`` (up to four),
+  ``--opacity N`` or ``--brightness N`` (0-100), and ``--countdown-ms N`` (stored only; there is no countdown yet).
+  ``otherhand glow reset`` restores the defaults. The next command that draws the glow uses the saved values.
+  "Turn the edge glow off" -> ``otherhand glow set --off``. "Make the glow thicker" -> ``otherhand glow set --thickness 18``.
+  "Make it orange and a bit dimmer" -> ``otherhand glow set --color #FF8800 --opacity 60``.
+  "Use cyan and purple" -> ``otherhand glow set --colors #00D4FF,#7C5CFF``. "Reset the glow" -> ``otherhand glow reset``.
 "@ | Set-Content -Encoding ASCII -Path (Join-Path $snipDir 'agent instructions.md')
   # No MCP config is written: this build is a command line tool and has no MCP server mode. Agents
   # with a shell tool use it directly with the instructions above.

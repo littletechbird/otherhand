@@ -31,12 +31,16 @@
 //! Settings live in `<profile>\.otherhand\config.json`:
 //!
 //! ```json
-//! { "glow": { "enabled": true, "color": "#00D4FF", "thickness": 6, "linger_ms": 1500,
-//!             "require_capture_exclusion": false } }
+//! { "glow": { "enabled": true, "color": "#00D4FF", "colors": ["#00D4FF"], "thickness": 12,
+//!             "opacity": 100, "linger_ms": 1500, "require_capture_exclusion": false } }
 //! ```
 //!
-//! `--no-glow` turns it off for one command. Everything here except the
-//! window code is plain logic and is tested on every platform.
+//! `otherhand glow show`, `glow set` and `glow reset` edit that block.
+//! `countdown_ms` is stored for a future focus-warning countdown and is not
+//! acted on. A saved change applies on the next command that draws the glow;
+//! the helper does not need a restart. `--no-glow` turns it off for one
+//! command. Everything here except the window code is plain logic and is
+//! tested on every platform.
 
 // The drawing half only exists on Windows; elsewhere the logic is still
 // built and tested.
@@ -45,13 +49,20 @@
 #[cfg(target_os = "windows")]
 mod windows;
 
+pub(crate) mod settings;
+
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub(crate) const DEFAULT_COLOR: u32 = 0x00D4FF;
-pub(crate) const DEFAULT_THICKNESS: u32 = 6;
+pub(crate) const DEFAULT_THICKNESS: u32 = 12;
 pub(crate) const DEFAULT_LINGER_MS: u64 = 1_500;
+pub(crate) const DEFAULT_OPACITY: u8 = 100;
+/// Colors past the first. The drawn palette is the primary color plus these.
+pub(crate) const MAX_EXTRA_COLORS: usize = 3;
+/// Upper bound for the reserved focus-warning countdown, in milliseconds.
+pub(crate) const MAX_COUNTDOWN_MS: u64 = 3_600_000;
 /// One full pulse, dim to bright and back.
 pub(crate) const PULSE_PERIOD_MS: u64 = 1_600;
 /// The helper leaves when it has shown nothing for this long.
@@ -69,22 +80,65 @@ pub(crate) const HIDE_MAX_MS: u64 = 5_000;
 /// rather than making and destroying windows on every tick.
 pub(crate) const REBUILD_RETRY_MS: u64 = 2_000;
 
+/// Extra palette stops after the primary color. Empty means one solid color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GlowStops {
+    pub extra: [u32; MAX_EXTRA_COLORS],
+    pub extra_count: u8,
+}
+
+impl Default for GlowStops {
+    fn default() -> Self {
+        Self { extra: [0; MAX_EXTRA_COLORS], extra_count: 0 }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GlowConfig {
     pub enabled: bool,
-    /// 0xRRGGBB.
+    /// Primary color, 0xRRGGBB. Also the first palette stop.
     pub color: u32,
+    pub stops: GlowStops,
     /// Frame width in pixels at 100% scaling.
     pub thickness: u32,
     pub linger_ms: u64,
     /// Show nothing when the frame can't be excluded from capture, instead
     /// of hiding it for Otherhand's own captures.
     pub strict: bool,
+    /// Brightness as a percent. 100 is the unscaled pulse.
+    pub opacity: u8,
 }
 
 impl Default for GlowConfig {
     fn default() -> Self {
-        Self { enabled: true, color: DEFAULT_COLOR, thickness: DEFAULT_THICKNESS, linger_ms: DEFAULT_LINGER_MS, strict: false }
+        Self {
+            enabled: true,
+            color: DEFAULT_COLOR,
+            stops: GlowStops::default(),
+            thickness: DEFAULT_THICKNESS,
+            linger_ms: DEFAULT_LINGER_MS,
+            strict: false,
+            opacity: DEFAULT_OPACITY,
+        }
+    }
+}
+
+impl GlowConfig {
+    /// Primary color first, then any extra stops, and how many of those are real.
+    pub(crate) fn palette(&self) -> ([u32; 4], usize) {
+        let extra = self.stops.extra_count.min(MAX_EXTRA_COLORS as u8) as usize;
+        let mut colors = [self.color, 0, 0, 0];
+        colors[1..1 + extra].copy_from_slice(&self.stops.extra[..extra]);
+        (colors, 1 + extra)
+    }
+
+    pub(crate) fn set_palette(&mut self, colors: &[u32]) {
+        let Some((first, rest)) = colors.split_first() else { return };
+        self.color = *first;
+        self.stops.extra = [0; MAX_EXTRA_COLORS];
+        let n = rest.len().min(MAX_EXTRA_COLORS);
+        self.stops.extra[..n].copy_from_slice(&rest[..n]);
+        self.stops.extra_count = n as u8;
     }
 }
 
@@ -127,6 +181,12 @@ pub(crate) fn config_from(doc: Option<&Value>) -> GlowConfig {
     if let Some(c) = glow.get("color").and_then(Value::as_str).and_then(parse_color) {
         cfg.color = c;
     }
+    if let Some(list) = glow.get("colors").and_then(Value::as_array) {
+        let parsed = palette_colors(list);
+        if !parsed.is_empty() {
+            cfg.set_palette(&parsed);
+        }
+    }
     if let Some(t) = glow.get("thickness").and_then(Value::as_u64) {
         cfg.thickness = t.clamp(2, 24) as u32;
     }
@@ -136,7 +196,19 @@ pub(crate) fn config_from(doc: Option<&Value>) -> GlowConfig {
     if let Some(b) = glow.get("require_capture_exclusion").and_then(Value::as_bool) {
         cfg.strict = b;
     }
+    if let Some(o) = percent_value(glow.get("opacity")).or_else(|| percent_value(glow.get("brightness"))) {
+        cfg.opacity = o;
+    }
     cfg
+}
+
+fn palette_colors(list: &[Value]) -> Vec<u32> {
+    list.iter().filter_map(|v| v.as_str().and_then(parse_color)).take(1 + MAX_EXTRA_COLORS).collect()
+}
+
+fn percent_value(value: Option<&Value>) -> Option<u8> {
+    let n = value?.as_u64()?;
+    Some(n.min(100) as u8)
 }
 
 /// `<profile>\.otherhand\<name>`, where the helper and the client leave
@@ -177,7 +249,7 @@ pub(crate) fn load_config() -> GlowConfig {
     config_from(doc.as_ref())
 }
 
-fn strip_bom(bytes: &[u8]) -> &[u8] {
+pub(crate) fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
 }
 
@@ -399,26 +471,48 @@ pub(crate) fn helper_entry() -> Option<std::process::ExitCode> {
 /// Packs the settings into the 64-bit message parameter a begin carries, so
 /// a changed setting shows on the next command without restarting the
 /// helper: color in bits 0-23, a "set" mark in bit 24, thickness in bits
-/// 25-29, "require capture exclusion" in bit 30 and the linger in bits 32-47.
+/// 25-29, "require capture exclusion" in bit 30, an opacity mark in bit 31,
+/// the linger in bits 32-47 and opacity (0-100) in bits 48-54. Extra palette
+/// stops do not fit; the helper reads those from the config file.
 pub(crate) fn pack_config(cfg: &GlowConfig) -> u64 {
     u64::from(cfg.color & 0xFF_FFFF)
         | 1 << 24
         | u64::from(cfg.thickness.clamp(2, 24)) << 25
         | u64::from(cfg.strict) << 30
+        | 1 << 31
         | cfg.linger_ms.min(10_000) << 32
+        | u64::from(cfg.opacity.min(100)) << 48
 }
 
 pub(crate) fn unpack_config(v: u64) -> Option<GlowConfig> {
     if v & (1 << 24) == 0 {
         return None;
     }
+    let opacity = if v & (1 << 31) == 0 { DEFAULT_OPACITY } else { ((v >> 48) & 0x7F).min(100) as u8 };
     Some(GlowConfig {
         enabled: true,
         color: (v & 0xFF_FFFF) as u32,
+        stops: GlowStops::default(),
         thickness: (((v >> 25) & 0x1F) as u32).clamp(2, 24),
         linger_ms: ((v >> 32) & 0xFFFF).min(10_000),
         strict: v & (1 << 30) != 0,
+        opacity,
     })
+}
+
+/// What the helper should draw after a begin. The file is the source of
+/// truth, including palette stops the packed message cannot carry. The
+/// helper only runs while the glow is enabled, so the adopted config is on.
+pub(crate) fn adopt_saved(saved: &GlowConfig) -> GlowConfig {
+    let mut cfg = *saved;
+    cfg.enabled = true;
+    cfg
+}
+
+/// Whether the strips have to be rebuilt. Opacity is applied when the strip
+/// is presented, so a brightness-only change does not rebuild them.
+pub(crate) fn frame_rebuild(prev: &GlowConfig, next: &GlowConfig) -> bool {
+    prev.color != next.color || prev.stops != next.stops || prev.thickness != next.thickness || prev.strict != next.strict
 }
 
 /// What the helper is started with.
@@ -441,7 +535,12 @@ impl HelperArgs {
             self.config.thickness.to_string(),
             "--linger".into(),
             self.config.linger_ms.to_string(),
+            "--opacity".into(),
+            self.config.opacity.to_string(),
         ]);
+        if self.config.stops.extra_count > 0 {
+            out.extend(["--colors".into(), palette_arg(&self.config)]);
+        }
         if self.config.strict {
             out.extend(["--strict".into(), "1".into()]);
         }
@@ -455,9 +554,14 @@ impl HelperArgs {
             let Some(value) = it.next() else { break };
             match flag.as_str() {
                 "--pid" => out.first_pid = value.parse().ok(),
-                "--color" => out.config.color = parse_color(value).unwrap_or(DEFAULT_COLOR),
+                "--color" => {
+                    out.config.color = parse_color(value).unwrap_or(DEFAULT_COLOR);
+                    out.config.stops = GlowStops::default();
+                }
+                "--colors" => out.config.set_palette(&palette_colors(&split_colors(value))),
                 "--thickness" => out.config.thickness = value.parse::<u32>().map_or(DEFAULT_THICKNESS, |t| t.clamp(2, 24)),
                 "--linger" => out.config.linger_ms = value.parse::<u64>().map_or(DEFAULT_LINGER_MS, |l| l.min(10_000)),
+                "--opacity" => out.config.opacity = value.parse::<u8>().map_or(DEFAULT_OPACITY, |o| o.min(100)),
                 "--strict" => out.config.strict = value == "1",
                 _ => {}
             }
@@ -537,12 +641,26 @@ impl Holders {
     }
 }
 
+fn palette_arg(cfg: &GlowConfig) -> String {
+    let (colors, n) = cfg.palette();
+    colors[..n].iter().copied().map(format_color).collect::<Vec<_>>().join(",")
+}
+
+fn split_colors(text: &str) -> Vec<Value> {
+    text.split(',').map(|part| Value::String(part.trim().to_string())).collect()
+}
+
 /// Constant alpha for the pulse at `t_ms`: a slow breath between about 60%
 /// and full, so the frame is noticeable without blinking.
 pub(crate) fn pulse_alpha(t_ms: u64) -> u8 {
     let phase = (t_ms % PULSE_PERIOD_MS) as f64 / PULSE_PERIOD_MS as f64;
     let wave = 0.5 - 0.5 * (phase * std::f64::consts::TAU).cos();
     (155.0 + 100.0 * wave).round().clamp(0.0, 255.0) as u8
+}
+
+/// Pulse alpha scaled by an opacity percent. 100 leaves the pulse unchanged.
+pub(crate) fn frame_alpha(t_ms: u64, opacity: u8) -> u8 {
+    (u32::from(pulse_alpha(t_ms)) * u32::from(opacity.min(100)) / 100) as u8
 }
 
 /// Thickness in pixels for a monitor at `dpi` (96 = 100%).
@@ -590,20 +708,41 @@ pub(crate) fn edge_alpha(d: i32, t: i32) -> u8 {
 /// Premultiplied BGRA pixels (as `u32` 0xAARRGGBB) for one strip, top row
 /// first. Distance is measured to the nearest monitor edge, so the corners
 /// meet cleanly.
-pub(crate) fn render_strip(strip: Rect, monitor: Rect, t: i32, color: u32) -> Vec<u32> {
-    let (r, g, b) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+pub(crate) fn render_strip(strip: Rect, monitor: Rect, t: i32, colors: &[u32]) -> Vec<u32> {
+    let fallback = [DEFAULT_COLOR];
+    let colors = if colors.is_empty() { &fallback[..] } else { colors };
     let mut out = Vec::with_capacity((strip.w.max(0) * strip.h.max(0)) as usize);
     for row in 0..strip.h {
         let y = strip.y + row - monitor.y;
         for col in 0..strip.w {
             let x = strip.x + col - monitor.x;
             let d = x.min(y).min(monitor.w - 1 - x).min(monitor.h - 1 - y);
+            let (r, g, b) = color_channels(colors, d, t);
             let a = u32::from(edge_alpha(d, t));
             let pm = |c: u32| (c * a + 127) / 255;
             out.push(a << 24 | pm(r) << 16 | pm(g) << 8 | pm(b));
         }
     }
     out
+}
+
+fn color_channels(colors: &[u32], d: i32, t: i32) -> (u32, u32, u32) {
+    if colors.len() < 2 || t <= 1 {
+        return channels(colors[0]);
+    }
+    let span = (colors.len() - 1) as f64;
+    let along = (d.max(0) as f64) / ((t - 1).max(1) as f64);
+    let scaled = (along * span).clamp(0.0, span);
+    let index = (scaled.floor() as usize).min(colors.len() - 2);
+    let frac = scaled - index as f64;
+    let (r0, g0, b0) = channels(colors[index]);
+    let (r1, g1, b1) = channels(colors[index + 1]);
+    let mix = |from: u32, to: u32| (from as f64 + (to as f64 - from as f64) * frac).round() as u32;
+    (mix(r0, r1), mix(g0, g1), mix(b0, b1))
+}
+
+fn channels(color: u32) -> (u32, u32, u32) {
+    ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF)
 }
 
 #[cfg(test)]

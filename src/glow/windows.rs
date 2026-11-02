@@ -23,9 +23,9 @@
 //! message and has to be answered before the command takes its picture.
 
 use super::{
-    CONTROL_CLASS, CaptureHides, CaptureMode, FRAME_CLASS, GlowConfig, HelperArgs, Holders, Rect, capture_mode,
-    keep_unexcluded_strip, pack_config, pulse_alpha, rebuild_due, render_strip, scaled_thickness, strips, unix_ms,
-    unpack_config, write_note,
+    CONTROL_CLASS, CaptureHides, CaptureMode, FRAME_CLASS, GlowConfig, HelperArgs, Holders, Rect, adopt_saved,
+    capture_mode, frame_alpha, frame_rebuild, keep_unexcluded_strip, pack_config, rebuild_due, render_strip,
+    scaled_thickness, strips, unix_ms, unpack_config, write_note,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -311,7 +311,6 @@ struct Strip {
 
 impl Strip {
     fn create(rect: Rect, monitor: Rect, t: i32, cfg: &GlowConfig, errors: &mut Errors) -> Option<Self> {
-        let color = cfg.color;
         let class = wide(FRAME_CLASS);
         let title = wide("Otherhand glow");
         let hwnd = unsafe {
@@ -343,7 +342,8 @@ impl Strip {
                 return None;
             }
         }
-        let pixels = render_strip(rect, monitor, t, color);
+        let (colors, count) = cfg.palette();
+        let pixels = render_strip(rect, monitor, t, &colors[..count]);
         let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
         info.bmiHeader = BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -530,8 +530,9 @@ impl Helper {
     }
 
     fn on_begin(&mut self, pid: u32, packed: u64) {
-        if let Some(next) = unpack_config(packed) {
-            if next.color != self.cfg.color || next.thickness != self.cfg.thickness || next.strict != self.cfg.strict {
+        if unpack_config(packed).is_some() {
+            let next = adopt_saved(&super::load_config());
+            if frame_rebuild(&self.cfg, &next) {
                 self.frame.clear();
                 self.shown = false;
                 self.last_build = None;
@@ -588,7 +589,7 @@ impl Helper {
                 self.shown = false;
                 self.dirty = true;
             }
-            let alpha = pulse_alpha(t);
+            let alpha = frame_alpha(t, self.cfg.opacity);
             let errors = &mut self.errors;
             let before = self.frame.len();
             self.frame.retain(|s| s.present(alpha, errors));
