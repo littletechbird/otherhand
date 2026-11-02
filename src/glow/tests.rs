@@ -51,7 +51,7 @@ fn only_desktop_actions_glow() {
         assert!(glows_for(c), "{c}");
     }
     for c in ["snapshot", "find", "screenshot", "get", "is", "list-windows", "list-apps", "wait", "version", "session",
-        "cursor-overlay", "trace", "clipboard-get", "clipboard-set", "skills", "jetpack note"] {
+        "cursor-overlay", "trace", "clipboard-get", "clipboard-set", "skills", "jetpack note", "glow", "glow set"] {
         assert!(!glows_for(c), "{c}");
     }
 }
@@ -66,7 +66,10 @@ fn the_flag_turns_it_off_and_reads_never_hold_it() {
 
 #[test]
 fn helper_args_round_trip() {
-    let a = HelperArgs { first_pid: Some(4321), config: GlowConfig { enabled: true, color: 0x12AB34, thickness: 9, linger_ms: 700, strict: true } };
+    let a = HelperArgs {
+        first_pid: Some(4321),
+        config: GlowConfig { color: 0x12AB34, thickness: 9, linger_ms: 700, strict: true, ..GlowConfig::default() },
+    };
     let argv = a.to_args();
     assert_eq!(argv[0], HELPER_ARG);
     assert_eq!(HelperArgs::parse(&argv[1..]), a);
@@ -194,7 +197,7 @@ fn the_edge_is_solid_and_fades_inward() {
 fn pixels_are_premultiplied_in_the_chosen_color() {
     let m = Rect { x: 0, y: 0, w: 100, h: 50 };
     let top = strips(m, 6)[0];
-    let px = render_strip(top, m, 6, 0x00D4FF);
+    let px = render_strip(top, m, 6, &[0x00D4FF]);
     assert_eq!(px.len(), (top.w * top.h) as usize);
     let edge = px[50];
     let a = edge >> 24;
@@ -209,7 +212,7 @@ fn pixels_are_premultiplied_in_the_chosen_color() {
     let corner = px[0];
     assert_eq!(corner >> 24, u32::from(edge_alpha(0, 6)));
     let left = strips(m, 6)[2];
-    let lp = render_strip(left, m, 6, 0xFF0000);
+    let lp = render_strip(left, m, 6, &[0xFF0000]);
     assert_eq!(lp[0] >> 24, u32::from(edge_alpha(0, 6)));
     assert_eq!(lp[5] >> 24, u32::from(edge_alpha(5, 6)));
 }
@@ -218,14 +221,14 @@ fn pixels_are_premultiplied_in_the_chosen_color() {
 fn settings_survive_the_trip_in_a_message() {
     for cfg in [
         GlowConfig::default(),
-        GlowConfig { enabled: true, color: 0xFF00FF, thickness: 24, linger_ms: 10_000, strict: true },
-        GlowConfig { enabled: true, color: 0x000000, thickness: 2, linger_ms: 0, strict: false },
+        GlowConfig { color: 0xFF00FF, thickness: 24, linger_ms: 10_000, strict: true, ..GlowConfig::default() },
+        GlowConfig { color: 0x000000, thickness: 2, linger_ms: 0, opacity: 0, ..GlowConfig::default() },
     ] {
         assert_eq!(unpack_config(pack_config(&cfg)), Some(cfg));
     }
     assert_eq!(unpack_config(0), None);
-    let clamped = unpack_config(pack_config(&GlowConfig { enabled: true, color: 0x1FF_FFFF, thickness: 99, linger_ms: 99_999, strict: false }));
-    assert_eq!(clamped, Some(GlowConfig { enabled: true, color: 0xFF_FFFF, thickness: 24, linger_ms: 10_000, strict: false }));
+    let clamped = unpack_config(pack_config(&GlowConfig { color: 0x1FF_FFFF, thickness: 99, linger_ms: 99_999, ..GlowConfig::default() }));
+    assert_eq!(clamped, Some(GlowConfig { color: 0xFF_FFFF, thickness: 24, linger_ms: 10_000, ..GlowConfig::default() }));
 }
 
 #[test]
@@ -282,6 +285,59 @@ fn a_capture_hide_ends_when_shown_timed_out_or_its_process_died() {
     assert!(!h.active(100 + HIDE_MAX_MS, |_| true), "a hide never outlives its deadline");
     h.hide(9, 0);
     assert!(!h.active(10, |p| p != 9), "a dead capturer can't keep the frame hidden");
+}
+
+#[test]
+fn opacity_clamps_and_a_palette_stops_at_four_colors() {
+    let cfg = config_from(Some(&json!({
+        "glow": { "opacity": 250, "brightness": 10, "colors": ["#010101", "nope", "#020202", "#030303", "#040404", "#050505"] }
+    })));
+    assert_eq!(cfg.opacity, 100);
+    let (colors, n) = cfg.palette();
+    assert_eq!(n, 4);
+    assert_eq!(&colors[..n], &[0x010101, 0x020202, 0x030303, 0x040404]);
+    assert_eq!(config_from(Some(&json!({ "glow": { "brightness": 33 } }))).opacity, 33);
+    assert_eq!(config_from(Some(&json!({ "glow": { "thickness": 1 } }))).thickness, 2);
+}
+
+#[test]
+fn frame_alpha_scales_the_pulse_and_full_opacity_matches_it() {
+    assert_eq!(frame_alpha(0, 100), pulse_alpha(0));
+    assert_eq!(frame_alpha(400, 0), 0);
+    let full = u32::from(pulse_alpha(400));
+    assert_eq!(u32::from(frame_alpha(400, 50)), full / 2);
+}
+
+#[test]
+fn two_colors_blend_from_the_outer_edge_to_the_inner_edge() {
+    let monitor = Rect { x: 0, y: 0, w: 40, h: 30 };
+    let top = strips(monitor, 8)[0];
+    let px = render_strip(top, monitor, 8, &[0xFF0000, 0x0000FF]);
+    let at = |row: i32, col: i32| px[(row * top.w + col) as usize];
+    let outer = at(0, 20);
+    let inner = at(7, 20);
+    assert!(outer >> 16 > inner >> 16, "outer pixel is the redder one");
+    assert!((inner & 0xFF) > (outer & 0xFF), "inner pixel is the bluer one");
+}
+
+#[test]
+fn extra_colors_travel_with_the_helper_and_the_file_not_the_packed_word() {
+    let mut cfg = GlowConfig::default();
+    cfg.set_palette(&[0xFF0000, 0x00FF00]);
+    cfg.opacity = 40;
+    cfg.enabled = false;
+    let packed = unpack_config(pack_config(&cfg)).unwrap();
+    assert_eq!((packed.color, packed.opacity, packed.stops.extra_count), (0xFF0000, 40, 0));
+    let launched = GlowConfig { enabled: true, ..cfg };
+    let back = HelperArgs::parse(&HelperArgs { first_pid: None, config: launched }.to_args()[1..]);
+    assert_eq!(back.config, launched);
+    let adopted = adopt_saved(&cfg);
+    assert!(adopted.enabled);
+    assert_eq!(adopted.stops, cfg.stops);
+    assert!(frame_rebuild(&GlowConfig::default(), &adopted));
+    assert!(!frame_rebuild(&adopted, &adopted));
+    let dimmer = GlowConfig { opacity: 10, ..adopted };
+    assert!(!frame_rebuild(&adopted, &dimmer));
 }
 
 #[test]

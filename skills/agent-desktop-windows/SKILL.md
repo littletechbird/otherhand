@@ -92,6 +92,27 @@ observation, actions and capture there fail or return nothing.
   the app reformats reads as failed. See `references/troubleshooting.md`.
 - **Unsigned binary warnings are expected.** See `references/troubleshooting.md`.
 
+## Screen-edge glow
+
+Otherhand draws a glow around the screen edge while it is acting. The person can change it in conversation. Run these and read the JSON envelope (`ok`, then `data`). Settings are stored in the `glow` object of `%USERPROFILE%\.otherhand\config.json`. They apply on the next command that draws the glow.
+
+```sh
+otherhand glow show
+otherhand glow set --on --thickness 18 --color #FF8800 --opacity 70
+otherhand glow set --colors #00D4FF,#7C5CFF
+otherhand glow set --off
+otherhand glow set --countdown-ms 5000
+otherhand glow reset
+```
+
+- "Turn the edge glow off" is `otherhand glow set --off`.
+- "Make the glow thicker" is `otherhand glow set --thickness 18`.
+- "Make it orange and a bit dimmer" is `otherhand glow set --color #FF8800 --opacity 60`.
+- "Use cyan and purple" is `otherhand glow set --colors #00D4FF,#7C5CFF`.
+- "Reset the glow" is `otherhand glow reset`.
+
+Thickness is an integer from 2 to 24 (default 12). Color is `#RGB` or `#RRGGBB`. `--colors` takes one to four colors, outer edge to inner edge. `--opacity` and `--brightness` are one setting, 0 to 100. `--countdown-ms` stores a millisecond value from 0 to 3600000 for a future focus-warning countdown and does not draw one. An out-of-range thickness, a bad color, or any other invalid value returns `INVALID_ARGS` and does not write the file. `--no-glow` still suppresses the frame for a single command.
+
 ## What differs on Windows
 
 - Ref actions are semantic UI Automation calls in headless and `--headed` mode, except `right-click`, `double-click`, `triple-click`, `type` and `focus`, which are physical or take focus and need `--headed`. `type` into a Chromium or Electron window also works headless; see `references/chromium-and-electron.md`.

@@ -99,7 +99,9 @@ fn run() -> ExitCode {
         agent_desktop_windows::WindowsPrivateFile,
     ));
 
-    if let Some((name, result)) = fence::jetpack::from_args(&std::env::args_os().collect::<Vec<_>>()) { return finish(&name, result); }
+    let args = std::env::args_os().collect::<Vec<_>>();
+    if let Some((name, result)) = glow::settings::from_args(&args) { return finish(&name, result); }
+    if let Some((name, result)) = fence::jetpack::from_args(&args) { return finish(&name, result); }
     let mut cli = match Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {
