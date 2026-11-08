@@ -39,7 +39,7 @@ fn mask_glow(image: ImageBuffer, area: Option<ScreenRect>, strips: &[crate::glow
     }
     let refuse = || {
         AdapterError::new(ErrorCode::Internal, "The screen-border glow could not be kept out of the screenshot")
-            .with_suggestion("Retry the screenshot; the glow fades out a moment after the last action.")
+            .with_suggestion("Retry the screenshot. The glow is hidden for that capture and shown again if the work session is still open.")
     };
     let area = area.ok_or_else(refuse)?;
     let boxes: Vec<ScreenRect> = strips

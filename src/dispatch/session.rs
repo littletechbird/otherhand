@@ -34,6 +34,7 @@ pub(crate) fn dispatch(
             }
             let value = session::execute(session::SessionAction::End { id: id.clone() })?;
             super::cursor_overlay::tear_down(adapter, &CursorOverlayControl::disable(id))?;
+            crate::glow::release_work();
             Ok(value)
         }
         SessionAction::List => session::execute(session::SessionAction::List),
