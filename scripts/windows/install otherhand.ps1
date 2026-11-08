@@ -95,18 +95,19 @@ $jetRoot = Join-Path $profileDir '.otherhand'
 $jetpack = Join-Path $jetRoot 'jetpack'
 if (New-Folder $jetpack) { Say "Made the jetpack folder: $jetpack" } else { Say "Jetpack folder is there (your notes are kept): $jetpack" }
 
-# 3b. Settings. The glow is a thin colored frame around each screen while Otherhand is acting, so you can see
-# when the agent has control. It never takes clicks or focus and never shows up in screenshots.
+# 3b. Settings. The glow is a colored frame around each screen while Otherhand is in a work session.
+# It stays up across commands, including headless ones, and fades for linger_ms after the session
+# releases. It never takes clicks or focus and never shows up in screenshots.
 $config = Join-Path $jetRoot 'config.json'
 if (Test-Path $config) {
   Say "Kept your settings: $config"
 } else {
-  [ordered]@{ glow = [ordered]@{ enabled = $true; color = '#00D4FF'; thickness = 6; linger_ms = 1500 } } |
+  [ordered]@{ glow = [ordered]@{ enabled = $true; color = '#00D4FF'; thickness = 24; linger_ms = 1500 } } |
     ConvertTo-Json -Depth 3 | Set-Content -Encoding ASCII -Path $config
   Say "Wrote your settings: $config"
 }
-Say '  While Otherhand acts, a soft cyan glow frames your screens. Change its color or turn it off in that file'
-Say '  ("glow": { "enabled": false }), or add --no-glow to a single command.'
+Say '  While Otherhand is working, a cyan glow frames your screens and stays up across commands.'
+Say '  Thickness defaults to 24 (2 through 48). Change it in that file, or add --no-glow once.'
 
 # 4. Optional: PATH for this account only.
 if ($AddToPath) {

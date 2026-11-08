@@ -92,6 +92,19 @@ observation, actions and capture there fail or return nothing.
   the app reformats reads as failed. See `references/troubleshooting.md`.
 - **Unsigned binary warnings are expected.** See `references/troubleshooting.md`.
 
+## Screen-edge glow
+
+A cyan frame is drawn around each monitor while Otherhand is in a work session. The session opens on the first acting command (`click`, `type`, `launch`, and the other commands that already glow) and stays up across later commands, including headless ones that leave `is_focused` false. Switching windows does not turn it off. It releases when `session end` runs, or when 30 seconds pass with no new acting command after the last client process has gone. `linger_ms` is only the fade after that release.
+
+The settings are the `glow` object in `%USERPROFILE%\.otherhand\config.json`, next to the jetpack folder. Edit that file. The next command that draws the frame uses the new values.
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | `false` turns the frame off. `--no-glow` does that for one command |
+| `thickness` | Integer from 2 to 48. Default 24, which is four times the original 6px edge. 30 is five times that edge |
+| `color` | `#RRGGBB`. Default `#00D4FF` |
+| `linger_ms` | Fade after the work session releases, at most 10000. Default 1500. Not how long the session stays up |
+
 ## What differs on Windows
 
 - Ref actions are semantic UI Automation calls in headless and `--headed` mode, except `right-click`, `double-click`, `triple-click`, `type` and `focus`, which are physical or take focus and need `--headed`. `type` into a Chromium or Electron window also works headless; see `references/chromium-and-electron.md`.
