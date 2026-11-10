@@ -54,21 +54,29 @@ fn press_chord(
     key_vk: u16,
     deadline: Deadline,
 ) -> Result<(), AdapterError> {
+    let gate = super::foreground_gate::ForegroundGate::arm()?;
+    let mut sent = false;
     for &vk in modifier_vks {
         deadline.ensure_remaining()?;
+        gate.ensure(sent)?;
         post_keyboard_inputs(&[key_input(vk, false)]);
         guard.note_pressed(vk);
+        sent = true;
     }
     deadline.ensure_remaining()?;
+    gate.ensure(sent)?;
     post_keyboard_inputs(&[key_input(key_vk, false)]);
     guard.note_pressed(key_vk);
+    sent = true;
 
     sleep_bounded(deadline, KEY_SETTLE)?;
 
+    gate.ensure(sent)?;
     post_keyboard_inputs(&[key_input(key_vk, true)]);
     guard.note_released(key_vk);
     for &vk in modifier_vks.iter().rev() {
         deadline.ensure_remaining()?;
+        gate.ensure(sent)?;
         post_keyboard_inputs(&[key_input(vk, true)]);
         guard.note_released(vk);
     }

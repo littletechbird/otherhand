@@ -79,7 +79,12 @@ pub(crate) fn compare(before: &Observation, after: &Observation) -> Change {
 
 /// Folds every sample taken while the command ran. A foreground that
 /// changed and was put back before the end still counts as changed.
-pub(crate) fn fold(before: &Observation, samples: &[Observation], after: &Observation, tool_input: bool) -> Change {
+pub(crate) fn fold(
+    before: &Observation,
+    samples: &[Observation],
+    after: &Observation,
+    tool_input: bool,
+) -> Change {
     let all = || samples.iter().chain(std::iter::once(after));
     Change {
         foreground_changed: all().any(|o| o.foreground != before.foreground),
@@ -93,7 +98,10 @@ pub(crate) fn fold(before: &Observation, samples: &[Observation], after: &Observ
 /// input with an unchanged foreground is the person, not the tool, unless
 /// the tool itself sent input during the command.
 pub(crate) fn user_only(change: Change) -> bool {
-    change.cursor_moved && change.user_input_seen && !change.foreground_changed && !change.tool_input
+    change.cursor_moved
+        && change.user_input_seen
+        && !change.foreground_changed
+        && !change.tool_input
 }
 
 /// How long the person's window was out of the foreground.
@@ -109,8 +117,16 @@ pub(crate) struct Away {
 
 /// Measures the away stretches from the timed samples. A stretch still open
 /// at the end, or a change seen only after the last sample, runs to `end_us`.
-pub(crate) fn away(before: &Observation, samples: &[Timed], after: &Observation, end_us: u64) -> Away {
-    let mut out = Away { back: after.foreground == before.foreground, ..Default::default() };
+pub(crate) fn away(
+    before: &Observation,
+    samples: &[Timed],
+    after: &Observation,
+    end_us: u64,
+) -> Away {
+    let mut out = Away {
+        back: after.foreground == before.foreground,
+        ..Default::default()
+    };
     let mut open: Option<u64> = None;
     let close = |start: u64, stop: u64, out: &mut Away| {
         let ms = stop.saturating_sub(start).div_ceil(1000);
@@ -181,17 +197,42 @@ pub(crate) fn is_person_switch(now_tick: u32, last_switch_tick: Option<u32>) -> 
 }
 
 pub(crate) fn stolen_error(cmd: &str, change: Change, cursor_restored: bool) -> AppError {
-    stolen_error_with(cmd, change, cursor_restored, Away::default(), ShieldReport::default())
+    stolen_error_with(
+        cmd,
+        change,
+        cursor_restored,
+        Away::default(),
+        ShieldReport::default(),
+    )
 }
 
-fn stolen_error_with(cmd: &str, change: Change, cursor_restored: bool, away: Away, shield: ShieldReport) -> AppError {
+fn stolen_error_with(
+    cmd: &str,
+    change: Change,
+    cursor_restored: bool,
+    away: Away,
+    shield: ShieldReport,
+) -> AppError {
     crate::fence::audit::append(
         "focus_stolen",
         &[
             ("action", cmd),
-            ("foreground_changed", if change.foreground_changed { "true" } else { "false" }),
-            ("cursor_moved", if change.cursor_moved { "true" } else { "false" }),
-            ("foreground_restored", if away.back { "true" } else { "false" }),
+            (
+                "foreground_changed",
+                if change.foreground_changed {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
+            (
+                "cursor_moved",
+                if change.cursor_moved { "true" } else { "false" },
+            ),
+            (
+                "foreground_restored",
+                if away.back { "true" } else { "false" },
+            ),
         ],
     );
     AdapterError::new(
@@ -251,7 +292,11 @@ fn annotate_error(error: AppError, note: Value) -> AppError {
     let mut adapter = match error {
         AppError::Adapter(a) => a,
         other => {
-            let code = if other.code() == ErrorCode::PermDenied.as_str() { ErrorCode::PermDenied } else { ErrorCode::Internal };
+            let code = if other.code() == ErrorCode::PermDenied.as_str() {
+                ErrorCode::PermDenied
+            } else {
+                ErrorCode::Internal
+            };
             AdapterError::new(code, other.to_string())
         }
     };
@@ -267,12 +312,91 @@ fn annotate_error(error: AppError, note: Value) -> AppError {
     AppError::Adapter(adapter)
 }
 
+fn read_foreground() -> ForegroundRead {
+    #[cfg(not(target_os = "windows"))]
+    {
+        ForegroundRead::Unsupported
+    }
+    #[cfg(target_os = "windows")]
+    {
+        match platform::observe() {
+            Some(obs) if obs.foreground != 0 => ForegroundRead::Seen,
+            _ => ForegroundRead::Blind,
+        }
+    }
+}
+
+fn blind_error(cmd: &str) -> AppError {
+    AdapterError::new(
+        ErrorCode::FocusStolen,
+        format!("'{cmd}' was not run because the foreground could not be watched"),
+    )
+    .with_details(json!({
+        "guard": "FOCUS_STOLEN",
+        "status": "BLIND",
+        "command": cmd,
+    }))
+    .with_suggestion("The focus guard refuses a headless command when it cannot read the foreground or start its sampler.")
+    .with_disposition(DeliverySemantics::not_delivered())
+    .into()
+}
+
+/// Whether the target window is the foreground. `use-type` for a secret
+/// requires this, so keystrokes cannot land in another window.
+pub(crate) fn window_is_foreground(window_id: Option<&str>) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window_id;
+        false
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let Some(id) = window_id else { return false };
+        let Some(raw) = id.strip_prefix("w-") else {
+            return false;
+        };
+        let Ok(hwnd) = raw.parse::<usize>() else {
+            return false;
+        };
+        platform::observe()
+            .is_some_and(|obs| obs.foreground != 0 && obs.foreground as usize == hwnd)
+    }
+}
+
 fn settle_ms(cmd: &str) -> u64 {
     match cmd {
         "launch" => 400,
         "click" | "set-value" | "type" | "select" | "toggle" | "check" | "uncheck" | "expand"
         | "collapse" | "close-app" | "fill-secret" | "scroll" => 120,
         _ => 0,
+    }
+}
+
+/// What a foreground read means for the guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForegroundRead {
+    Seen,
+    /// This platform has a guard, and it could not read the foreground.
+    Blind,
+    /// This platform does not implement the guard.
+    Unsupported,
+}
+
+/// A headless focus-taking command refuses when the guard cannot see the
+/// foreground or cannot start its sampler. Reads and platforms without a
+/// guard are unchanged.
+pub(crate) fn blocks_when_blind(
+    command: &str,
+    read: ForegroundRead,
+    sampler_started: bool,
+) -> bool {
+    if !crate::glow::warn::warning_required(command) {
+        return false;
+    }
+    match read {
+        ForegroundRead::Unsupported => false,
+        ForegroundRead::Blind => true,
+        ForegroundRead::Seen => !sampler_started,
     }
 }
 
@@ -283,16 +407,34 @@ pub(crate) fn guard(
     headed: bool,
     run: impl FnOnce() -> Result<Value, AppError>,
 ) -> Result<Value, AppError> {
-    if headed || matches!(cmd, "version" | "skills" | "trace" | "session" | "cursor-overlay") {
+    if headed
+        || matches!(
+            cmd,
+            "version" | "skills" | "trace" | "session" | "cursor-overlay"
+        )
+    {
         return run();
     }
-    let Some(before) = platform::observe() else {
-        return run();
+    let before = match read_foreground() {
+        ForegroundRead::Unsupported => return run(),
+        ForegroundRead::Blind => {
+            if blocks_when_blind(cmd, ForegroundRead::Blind, true) {
+                return Err(blind_error(cmd));
+            }
+            return run();
+        }
+        ForegroundRead::Seen => match platform::observe() {
+            Some(obs) => obs,
+            None => return Err(blind_error(cmd)),
+        },
     };
     let started = Instant::now();
     let input_before = tool_input_count();
     let shield = platform::Shield::raise(before.foreground);
     let sampler = Sampler::start(before, started);
+    if !sampler.armed() && blocks_when_blind(cmd, ForegroundRead::Seen, false) {
+        return Err(blind_error(cmd));
+    }
     let result = run();
     let pause = settle_ms(cmd);
     if pause > 0 {
@@ -302,7 +444,14 @@ pub(crate) fn guard(
     shield.restore_now();
     let report = shield.lower();
     let Some(after) = platform::observe() else {
-        return Err(stolen_error(cmd, Change { foreground_changed: true, ..Default::default() }, false));
+        return Err(stolen_error(
+            cmd,
+            Change {
+                foreground_changed: true,
+                ..Default::default()
+            },
+            false,
+        ));
     };
     let end_us = started.elapsed().as_micros() as u64;
     let plain: Vec<Observation> = samples.iter().map(|t| t.obs).collect();
@@ -311,11 +460,16 @@ pub(crate) fn guard(
     match decide(change, gone, report) {
         Verdict::Clean | Verdict::PersonOnly => result,
         Verdict::Restored => {
-            crate::fence::audit::append("focus_restored", &[("action", cmd), ("away_ms", &gone.longest_ms.to_string())]);
+            crate::fence::audit::append(
+                "focus_restored",
+                &[("action", cmd), ("away_ms", &gone.longest_ms.to_string())],
+            );
             annotate(result, restored_note(gone, report))
         }
         Verdict::Stolen => {
-            let restored = change.cursor_moved && (!change.user_input_seen || change.tool_input) && platform::set_cursor(before.cursor);
+            let restored = change.cursor_moved
+                && (!change.user_input_seen || change.tool_input)
+                && platform::set_cursor(before.cursor);
             Err(stolen_error_with(cmd, change, restored, gone, report))
         }
     }
@@ -327,6 +481,7 @@ pub(crate) fn guard(
 struct Sampler {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<Vec<Timed>>>,
+    armed: bool,
 }
 
 impl Sampler {
@@ -345,7 +500,10 @@ impl Sampler {
                         }
                         if o != last {
                             if seen.len() < 4096 {
-                                seen.push(Timed { at_us: started.elapsed().as_micros() as u64, obs: o });
+                                seen.push(Timed {
+                                    at_us: started.elapsed().as_micros() as u64,
+                                    obs: o,
+                                });
                             }
                             last = o;
                         }
@@ -355,12 +513,24 @@ impl Sampler {
                 seen
             })
             .ok();
-        Self { stop, thread }
+        let armed = thread.is_some();
+        Self {
+            stop,
+            thread,
+            armed,
+        }
+    }
+
+    fn armed(&self) -> bool {
+        self.armed
     }
 
     fn stop(mut self) -> Vec<Timed> {
         self.stop.store(true, Ordering::SeqCst);
-        self.thread.take().and_then(|t| t.join().ok()).unwrap_or_default()
+        self.thread
+            .take()
+            .and_then(|t| t.join().ok())
+            .unwrap_or_default()
     }
 }
 

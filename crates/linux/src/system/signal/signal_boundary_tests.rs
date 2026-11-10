@@ -24,7 +24,8 @@ fn successor(code: &ErrorCode) -> Option<ErrorCode> {
         ErrorCode::PolicyDenied => Some(ErrorCode::AppUnresponsive),
         ErrorCode::AppUnresponsive => Some(ErrorCode::Fenced),
         ErrorCode::Fenced => Some(ErrorCode::FocusStolen),
-        ErrorCode::FocusStolen => Some(ErrorCode::Internal),
+        ErrorCode::FocusStolen => Some(ErrorCode::GlowUnavailable),
+        ErrorCode::GlowUnavailable => Some(ErrorCode::Internal),
         ErrorCode::Internal => None,
     }
 }

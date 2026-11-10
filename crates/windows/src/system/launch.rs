@@ -279,28 +279,39 @@ fn command_line_for(executable: &Path, args: &[String]) -> Result<String, Adapte
     Ok(line)
 }
 
-/// Encodes one argument for the command line the child parses back apart.
-///
-/// The trailing backslash run is the case that silently corrupts: backslashes
-/// are literal except immediately before a quote, so a value ending in one
-/// would escape the closing quote this appends, leaving the quoted region open
-/// and swallowing every later argument into it. That run is therefore doubled.
-/// An embedded quote stays doubled rather than backslash-escaped: that is a
-/// valid encoding for the consecutive-quote rule and the form `cmd` accepts,
-/// which backslash-escaping is not.
+/// Encodes one argument the way the C runtime parses `CommandLineToArgvW`.
+/// Backslashes stay literal except immediately before a quote: a run of 2n
+/// encodes n backslashes, and a run of 2n+1 encodes n backslashes plus a
+/// literal quote. The trailing run is doubled so it cannot escape the closing
+/// quote. `.bat` and `.cmd` targets are refused before this runs, because
+/// cmd.exe parses those files with a different set of rules.
 fn quote_arg(value: &str) -> String {
     if !value.is_empty() && !value.chars().any(|c| c.is_whitespace() || c == '"') {
         return value.to_string();
     }
     let mut out = String::from("\"");
+    let mut backslashes = 0u32;
     for ch in value.chars() {
-        if ch == '"' {
-            out.push('"');
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..(backslashes.saturating_mul(2)) {
+                    out.push('\\');
+                }
+                out.push('\\');
+                out.push('"');
+                backslashes = 0;
+            }
+            other => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push(other);
+            }
         }
-        out.push(ch);
     }
-    let trailing = value.len() - value.trim_end_matches('\\').len();
-    for _ in 0..trailing {
+    for _ in 0..(backslashes.saturating_mul(2)) {
         out.push('\\');
     }
     out.push('"');

@@ -353,13 +353,10 @@ fn full_image_path(pid: ProcessId) -> Option<PathBuf> {
     )))
 }
 
-/// A value ending in a backslash would otherwise escape the closing quote,
-/// leaving the quoted region open so every later argument is swallowed into
-/// it. The run is doubled; backslashes elsewhere stay literal. An embedded
-/// quote is doubled rather than backslash-escaped, since doubling is what
-/// satisfies the consecutive-quote rule and the form `cmd` itself accepts.
-/// An empty argument is still wrapped in its own pair of quotes so it
-/// survives as a token instead of vanishing between two spaces.
+/// A value ending in a backslash would otherwise escape the closing quote.
+/// An embedded quote is backslash-escaped, including the backslash that
+/// precedes it, which is the C runtime rule. An empty argument is still
+/// wrapped so it survives as its own token.
 #[test]
 fn a_trailing_backslash_cannot_escape_the_closing_quote() {
     assert_eq!(
@@ -378,8 +375,13 @@ fn a_trailing_backslash_cannot_escape_the_closing_quote() {
     assert_eq!(super::quote_arg("plain"), "plain");
     assert_eq!(
         super::quote_arg("a\"b"),
-        "\"a\"\"b\"",
-        "an embedded quote is doubled, not backslash-escaped"
+        "\"a\\\"b\"",
+        "an embedded quote is backslash-escaped"
+    );
+    assert_eq!(
+        super::quote_arg("a\\\"b"),
+        "\"a\\\\\\\"b\"",
+        "a backslash before an embedded quote is doubled, then the quote is escaped"
     );
     assert_eq!(
         super::quote_arg(""),

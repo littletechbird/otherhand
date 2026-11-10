@@ -25,6 +25,24 @@ fn refused(code: ErrorCode, message: &str, suggestion: &str) -> AppError {
         .into()
 }
 
+fn origin_still_allowed(entry: &agent_desktop_core::RefEntry, allowed: &[String]) -> bool {
+    let probe = crate::fence::platform_probe();
+    let facts = probe.process(entry.process.pid.get());
+    let fresh = if origin::is_chromium(&facts) {
+        let window = entry.source.source_window_id.as_deref().unwrap_or("");
+        match origin::page_origin(
+            origin::chromium_document_url(window).as_deref(),
+            origin::chromium_address(window).as_deref(),
+        ) {
+            Some(page) => vec![page],
+            None => return false,
+        }
+    } else {
+        origin::native_origins(&facts)
+    };
+    !fresh.is_empty() && vault::origin_allowed(allowed, &fresh)
+}
+
 /// Strips everything but the error code from a failed fill, so no detail
 /// computed from the plaintext (lengths, read-backs) can travel out.
 fn scrub(error: AppError) -> AppError {
@@ -37,7 +55,9 @@ fn scrub(error: AppError) -> AppError {
         _ => DeliverySemantics::uncertain(),
     };
     AdapterError::new(code, "The secret could not be filled into that field")
-        .with_suggestion("Take a fresh snapshot and check the field; the secret was not shown anywhere")
+        .with_suggestion(
+            "Take a fresh snapshot and check the field; the secret was not shown anywhere",
+        )
         .with_disposition(disposition)
         .into()
 }
@@ -47,7 +67,10 @@ pub(crate) fn execute(
     adapter: &dyn PlatformAdapter,
     context: &CommandContext,
 ) -> Result<Value, AppError> {
-    if context.trace_enabled() || tracing::level_filters::LevelFilter::current() >= tracing::level_filters::LevelFilter::DEBUG {
+    if context.trace_enabled()
+        || tracing::level_filters::LevelFilter::current()
+            >= tracing::level_filters::LevelFilter::DEBUG
+    {
         return Err(refused(
             ErrorCode::PolicyDenied,
             "fill-secret refuses to run with tracing or verbose logging on",
@@ -55,7 +78,11 @@ pub(crate) fn execute(
         ));
     }
     if !req.handle.starts_with(vault::HANDLE_PREFIX) {
-        return Err(refused(ErrorCode::InvalidArgs, "HANDLE must be a Dark Room handle (dr_sec_...)", "Pass the handle, never the secret itself"));
+        return Err(refused(
+            ErrorCode::InvalidArgs,
+            "HANDLE must be a Dark Room handle (dr_sec_...)",
+            "Pass the handle, never the secret itself",
+        ));
     }
     let entry = RefStore::for_session(context.session_id())?.load_ref(&req.ref_id)?;
     // Is the field one whose text can be read back? Asked before anything is decrypted.
@@ -64,15 +91,26 @@ pub(crate) fn execute(
         .resolve_element_strict(&entry, deadline)
         .ok()
         .and_then(|h| adapter.get_live_state(&h, deadline).ok().flatten())
-        .is_some_and(|s| agent_desktop_core::tree::state::has_state(&s.states, agent_desktop_core::tree::state::SECURE));
+        .is_some_and(|s| {
+            agent_desktop_core::tree::state::has_state(
+                &s.states,
+                agent_desktop_core::tree::state::SECURE,
+            )
+        });
     let probe = crate::fence::platform_probe();
     let facts = probe.process(entry.process.pid.get());
     let origins: Vec<String> = if origin::is_chromium(&facts) {
         let window = entry.source.source_window_id.as_deref().unwrap_or("");
-        match origin::page_origin(origin::chromium_document_url(window).as_deref(), origin::chromium_address(window).as_deref()) {
+        match origin::page_origin(
+            origin::chromium_document_url(window).as_deref(),
+            origin::chromium_address(window).as_deref(),
+        ) {
             Some(o) => vec![o],
             None => {
-                audit::append("resolve_origin_unknown", &[("handle", &req.handle), ("via", "agent-desktop")]);
+                audit::append(
+                    "resolve_origin_unknown",
+                    &[("handle", &req.handle), ("via", "agent-desktop")],
+                );
                 return Err(refused(
                     ErrorCode::PolicyDenied,
                     "The page's full URL could not be read, or the address bar disagrees with it, so the secret was not used",
@@ -83,44 +121,108 @@ pub(crate) fn execute(
     } else {
         origin::native_origins(&facts)
     };
-    let dir = audit::darkroom_dir().ok_or_else(|| refused(ErrorCode::InvalidArgs, "No Dark Room vault directory", "Set DARKROOM_HOME or create ~/.darkroom with Dark Room"))?;
+    let dir = audit::darkroom_dir().ok_or_else(|| {
+        refused(
+            ErrorCode::InvalidArgs,
+            "No Dark Room vault directory",
+            "Set DARKROOM_HOME or create ~/.darkroom with Dark Room",
+        )
+    })?;
     let resolved = vault::resolve_entry(&dir, &req.handle, &origins).map_err(|e| {
         let code = match e {
-            vault::VaultError::OriginDenied | vault::VaultError::NoOrigins => ErrorCode::PolicyDenied,
+            vault::VaultError::OriginDenied | vault::VaultError::NoOrigins => {
+                ErrorCode::PolicyDenied
+            }
             _ => ErrorCode::InvalidArgs,
         };
-        refused(code, &format!("Dark Room refused the handle ({})", e.as_str()), "Ask the user to mint or re-scope the handle in Dark Room")
+        refused(
+            code,
+            &format!("Dark Room refused the handle ({})", e.as_str()),
+            "Ask the user to mint or re-scope the handle in Dark Room",
+        )
     })?;
+    if req.use_type && !secure {
+        drop(resolved);
+        return Err(refused(
+            ErrorCode::PolicyDenied,
+            "use-type only fills a password field, where the text cannot be read back",
+            "Leave use-type off, or target the password field",
+        ));
+    }
+    if req.use_type
+        && !crate::focus_guard::window_is_foreground(entry.source.source_window_id.as_deref())
+    {
+        drop(resolved);
+        return Err(refused(
+            ErrorCode::PolicyDenied,
+            "use-type was refused because the target window is not the foreground",
+            "Focus that window yourself, or fill with set-value",
+        ));
+    }
+    if !origin_still_allowed(&entry, &resolved.allowed) {
+        drop(resolved);
+        audit::append(
+            "resolve_origin_unknown",
+            &[("handle", &req.handle), ("via", "agent-desktop")],
+        );
+        return Err(refused(
+            ErrorCode::PolicyDenied,
+            "The page changed before the secret was written, so it was not used",
+            "Snapshot the field again and retry",
+        ));
+    }
     if !secure && !resolved.fill_visible {
         drop(resolved);
-        audit::append("fill_refused_visible_field", &[("handle", &req.handle), ("via", "agent-desktop")]);
+        audit::append(
+            "fill_refused_visible_field",
+            &[("handle", &req.handle), ("via", "agent-desktop")],
+        );
         return Err(refused(
             ErrorCode::PolicyDenied,
             "That field shows its text, so anything could read the secret back; only password fields are filled",
             "Use the password field, or ask the user to allow this handle in visible fields in Dark Room",
         ));
     }
-    let mut value = resolved.plain.as_str().to_string();
-    drop(resolved);
+    let mut value = resolved.plain.into_string();
     let result = if req.use_type {
+        let text = std::mem::take(&mut value);
         type_command::execute(
-            type_command::TypeArgs { ref_id: req.ref_id.clone(), text: value.clone(), timeout_ms: req.timeout_ms, interval_ms: None },
+            type_command::TypeArgs {
+                ref_id: req.ref_id.clone(),
+                text,
+                timeout_ms: req.timeout_ms,
+                interval_ms: None,
+            },
             adapter,
             context,
         )
     } else {
+        let text = std::mem::take(&mut value);
         set_value_command::execute(
-            set_value_command::SetValueArgs { ref_id: req.ref_id.clone(), value: value.clone(), timeout_ms: req.timeout_ms },
+            set_value_command::SetValueArgs {
+                ref_id: req.ref_id.clone(),
+                value: text,
+                timeout_ms: req.timeout_ms,
+            },
             adapter,
             context,
         )
     };
-    unsafe { value.as_mut_vec().iter_mut().for_each(|b| *b = 0) };
+    let mut wiped = std::mem::take(&mut value).into_bytes();
+    wiped.fill(0);
+    drop(wiped);
     drop(value);
     let origin = origins.first().cloned().unwrap_or_default();
     match result {
         Ok(_) => {
-            audit::append("fill_ok", &[("handle", &req.handle), ("origin", &origin), ("via", "agent-desktop")]);
+            audit::append(
+                "fill_ok",
+                &[
+                    ("handle", &req.handle),
+                    ("origin", &origin),
+                    ("via", "agent-desktop"),
+                ],
+            );
             Ok(json!({
                 "filled": true,
                 "ref": req.ref_id,
@@ -130,7 +232,14 @@ pub(crate) fn execute(
             }))
         }
         Err(e) => {
-            audit::append("fill_failed", &[("handle", &req.handle), ("origin", &origin), ("via", "agent-desktop")]);
+            audit::append(
+                "fill_failed",
+                &[
+                    ("handle", &req.handle),
+                    ("origin", &origin),
+                    ("via", "agent-desktop"),
+                ],
+            );
             Err(scrub(e))
         }
     }

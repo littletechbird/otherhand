@@ -20,6 +20,7 @@ pub enum ErrorCode {
     AppUnresponsive,
     FocusStolen,
     Fenced,
+    GlowUnavailable,
     Internal,
 }
 
@@ -43,6 +44,7 @@ impl ErrorCode {
             Self::AppUnresponsive => "APP_UNRESPONSIVE",
             Self::FocusStolen => "FOCUS_STOLEN",
             Self::Fenced => "FENCED",
+            Self::GlowUnavailable => "GLOW_UNAVAILABLE",
             Self::Internal => "INTERNAL",
         }
     }

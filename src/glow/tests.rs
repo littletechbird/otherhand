@@ -17,24 +17,34 @@ fn the_default_is_on_and_soft_cyan() {
     let cfg = config_from(None);
     assert!(cfg.enabled);
     assert_eq!(cfg.color, 0x00D4FF);
+    assert_eq!(cfg.thickness, 24);
+    assert_eq!(DEFAULT_THICKNESS, 4 * 6);
     assert_eq!(cfg.linger_ms, 1_500);
     assert_eq!(config_from(Some(&json!({}))), GlowConfig::default());
 }
 
 #[test]
-fn the_config_can_turn_it_off_or_recolor_it() {
-    assert!(!config_from(Some(&json!({ "glow": false }))).enabled);
-    assert!(!config_from(Some(&json!({ "glow": { "enabled": false } }))).enabled);
-    let cfg = config_from(Some(&json!({ "glow": { "color": "#FF00FF", "thickness": 99, "linger_ms": 99_999 } })));
+fn the_config_cannot_turn_the_warning_off() {
+    assert!(config_from(Some(&json!({ "glow": false }))).enabled);
+    assert!(config_from(Some(&json!({ "glow": { "enabled": false } }))).enabled);
+    assert_eq!(
+        config_from(Some(&json!({ "glow": { "countdown_ms": 50 } }))).countdown_ms,
+        crate::glow::warn::MIN_COUNTDOWN_MS
+    );
+    let cfg = config_from(Some(
+        &json!({ "glow": { "color": "#FF00FF", "thickness": 99, "linger_ms": 99_999 } }),
+    ));
     assert!(cfg.enabled);
     assert_eq!(cfg.color, 0xFF00FF);
-    assert_eq!(cfg.thickness, 24);
+    assert_eq!(cfg.thickness, MAX_THICKNESS);
     assert_eq!(cfg.linger_ms, 10_000);
 }
 
 #[test]
 fn a_broken_setting_falls_back_instead_of_turning_the_glow_off() {
-    let cfg = config_from(Some(&json!({ "glow": { "enabled": "nope", "color": "blue", "thickness": -3 } })));
+    let cfg = config_from(Some(
+        &json!({ "glow": { "enabled": "nope", "color": "blue", "thickness": -3 } }),
+    ));
     assert_eq!(cfg, GlowConfig::default());
 }
 
@@ -46,44 +56,100 @@ fn a_bom_is_ignored() {
 
 #[test]
 fn only_desktop_actions_glow() {
-    for c in ["click", "set-value", "type", "expand", "scroll", "launch", "press", "fill-secret", "batch", "mouse-click"] {
+    for c in [
+        "click",
+        "set-value",
+        "type",
+        "expand",
+        "scroll",
+        "launch",
+        "press",
+        "fill-secret",
+        "batch",
+        "mouse-click",
+    ] {
         assert!(glows_for(c), "{c}");
     }
-    for c in ["snapshot", "find", "screenshot", "get", "is", "list-windows", "list-apps", "wait", "version", "session",
-        "cursor-overlay", "trace", "clipboard-get", "clipboard-set", "skills", "jetpack note"] {
+    for c in [
+        "snapshot",
+        "find",
+        "screenshot",
+        "get",
+        "is",
+        "list-windows",
+        "list-apps",
+        "wait",
+        "version",
+        "session",
+        "cursor-overlay",
+        "trace",
+        "clipboard-get",
+        "clipboard-set",
+        "skills",
+        "jetpack note",
+    ] {
         assert!(!glows_for(c), "{c}");
     }
 }
 
 #[test]
-fn the_flag_turns_it_off_and_reads_never_hold_it() {
-    set_disabled_by_flag(true);
-    assert!(begin("click").is_none());
-    set_disabled_by_flag(false);
-    assert!(begin("snapshot").is_none());
+fn a_missing_frame_refuses_before_the_command_can_run() {
+    crate::glow::warn::script_fail("helper did not answer");
+    let error = prepare("click").expect_err("a dark frame must refuse");
+    assert_eq!(error.code(), "GLOW_UNAVAILABLE");
+    assert!(error.to_string().contains("could not be shown"));
+    crate::glow::warn::script_shown();
+}
+
+fn a_read_does_not_warn_and_a_click_waits_before_it_returns() {
+    assert!(prepare("snapshot").unwrap().hold.is_none());
+    crate::glow::warn::reset_wait();
+    let prepared = prepare("click").unwrap();
+    assert!(prepared.report.shown);
+    assert!(prepared.report.countdown_ms >= crate::glow::warn::MIN_COUNTDOWN_MS);
+    assert!(crate::glow::warn::waited_ms() >= crate::glow::warn::MIN_COUNTDOWN_MS);
+    drop(prepared);
 }
 
 #[test]
 fn helper_args_round_trip() {
-    let a = HelperArgs { first_pid: Some(4321), config: GlowConfig { enabled: true, color: 0x12AB34, thickness: 9, linger_ms: 700, strict: true } };
+    let a = HelperArgs {
+        first_pid: Some(4321),
+        config: GlowConfig {
+            enabled: true,
+            color: 0x12AB34,
+            thickness: 9,
+            linger_ms: 700,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
+            strict: true,
+        },
+    };
     let argv = a.to_args();
     assert_eq!(argv[0], HELPER_ARG);
     assert_eq!(HelperArgs::parse(&argv[1..]), a);
-    let junk: Vec<String> = ["--color", "nope", "--thickness", "x", "--pid"].iter().map(|s| s.to_string()).collect();
+    let junk: Vec<String> = ["--color", "nope", "--thickness", "x", "--pid"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let p = HelperArgs::parse(&junk);
-    assert_eq!((p.first_pid, p.config.color, p.config.thickness), (None, DEFAULT_COLOR, DEFAULT_THICKNESS));
+    assert_eq!(
+        (p.first_pid, p.config.color, p.config.thickness),
+        (None, DEFAULT_COLOR, DEFAULT_THICKNESS)
+    );
 }
 
 #[test]
-fn the_frame_stays_up_while_held_and_lingers_after() {
+fn the_frame_stays_up_for_the_work_session_then_fades() {
     let mut h = Holders::new(1_500, 0);
     assert!(!h.visible(0));
     h.begin(10);
     assert!(h.visible(100));
     h.end(10, 1_000);
-    assert!(h.visible(2_000));
-    assert!(h.visible(2_499));
-    assert!(!h.visible(2_500));
+    assert!(h.session_open(1_000 + 10_000));
+    assert!(h.visible(1_000 + SESSION_IDLE_MS - 1));
+    let fade_end = 1_000 + SESSION_IDLE_MS + 1_500;
+    assert!(h.visible(fade_end - 1));
+    assert!(!h.visible(fade_end));
 }
 
 #[test]
@@ -94,8 +160,13 @@ fn a_new_command_inside_the_linger_keeps_it_up_without_a_gap() {
     h.begin(11);
     assert!(h.visible(5_000));
     h.end(11, 5_000);
-    assert!(h.visible(6_400));
-    assert!(!h.visible(6_500));
+    assert!(
+        h.visible(5_000 + 10_000),
+        "the gap is the work session, not linger_ms"
+    );
+    let fade_end = 5_000 + SESSION_IDLE_MS + 1_500;
+    assert!(h.visible(fade_end - 1));
+    assert!(!h.visible(fade_end));
 }
 
 #[test]
@@ -106,7 +177,8 @@ fn two_holders_end_only_when_both_let_go() {
     h.end(10, 100);
     assert!(h.visible(10_000));
     h.end(11, 10_000);
-    assert!(!h.visible(11_500));
+    assert!(h.visible(11_500), "release has not happened yet");
+    assert!(!h.visible(10_000 + SESSION_IDLE_MS + 1_500));
 }
 
 #[test]
@@ -115,16 +187,19 @@ fn a_crashed_command_is_let_go_by_the_pid_check() {
     h.begin(10);
     h.prune(200, |_| false);
     assert!(h.pids().is_empty());
-    assert!(h.visible(1_699));
-    assert!(!h.visible(1_700));
+    assert!(
+        h.visible(10_000),
+        "a dead client does not drop the session at linger_ms"
+    );
+    assert!(!h.visible(200 + SESSION_IDLE_MS + 1_500));
 }
 
 #[test]
 fn an_unmatched_end_is_harmless() {
     let mut h = Holders::new(1_500, 0);
     h.end(99, 0);
-    assert!(h.visible(10));
-    assert!(!h.visible(1_500));
+    assert!(!h.visible(10));
+    assert!(!h.session_open(1_500));
 }
 
 #[test]
@@ -132,10 +207,12 @@ fn the_helper_leaves_after_a_minute_of_nothing() {
     let mut h = Holders::new(1_500, 0);
     h.begin(1);
     h.end(1, 1_000);
+    let fade_end = 1_000 + SESSION_IDLE_MS + 1_500;
     assert!(h.visible(2_000));
-    assert!(!h.visible(3_000));
-    assert!(!h.should_exit(30_000));
-    assert!(h.should_exit(62_000));
+    assert!(h.visible(fade_end - 1));
+    assert!(!h.visible(fade_end));
+    assert!(!h.should_exit(fade_end + 30_000));
+    assert!(h.should_exit(fade_end + IDLE_EXIT_MS));
     h.begin(2);
     assert!(!h.should_exit(500_000));
 }
@@ -163,7 +240,12 @@ fn thickness_follows_scaling() {
 
 #[test]
 fn four_strips_cover_the_edge_and_never_overlap() {
-    let m = Rect { x: -1920, y: 0, w: 1920, h: 1080 };
+    let m = Rect {
+        x: -1920,
+        y: 0,
+        w: 1920,
+        h: 1080,
+    };
     let s = strips(m, 6);
     assert_eq!(s.len(), 4);
     let area: i32 = s.iter().map(|r| r.w * r.h).sum();
@@ -171,11 +253,20 @@ fn four_strips_cover_the_edge_and_never_overlap() {
     for (i, a) in s.iter().enumerate() {
         assert!(a.x >= m.x && a.y >= m.y && a.x + a.w <= m.x + m.w && a.y + a.h <= m.y + m.h);
         for b in &s[i + 1..] {
-            let apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+            let apart =
+                a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
             assert!(apart, "{a:?} {b:?}");
         }
     }
-    let tiny = strips(Rect { x: 0, y: 0, w: 4, h: 4 }, 6);
+    let tiny = strips(
+        Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 4,
+        },
+        6,
+    );
     assert_eq!(tiny.len(), 2);
 }
 
@@ -191,7 +282,12 @@ fn the_edge_is_solid_and_fades_inward() {
 
 #[test]
 fn pixels_are_premultiplied_in_the_chosen_color() {
-    let m = Rect { x: 0, y: 0, w: 100, h: 50 };
+    let m = Rect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 50,
+    };
     let top = strips(m, 6)[0];
     let px = render_strip(top, m, 6, 0x00D4FF);
     assert_eq!(px.len(), (top.w * top.h) as usize);
@@ -217,40 +313,132 @@ fn pixels_are_premultiplied_in_the_chosen_color() {
 fn settings_survive_the_trip_in_a_message() {
     for cfg in [
         GlowConfig::default(),
-        GlowConfig { enabled: true, color: 0xFF00FF, thickness: 24, linger_ms: 10_000, strict: true },
-        GlowConfig { enabled: true, color: 0x000000, thickness: 2, linger_ms: 0, strict: false },
+        GlowConfig {
+            enabled: true,
+            color: 0xFF00FF,
+            thickness: 24,
+            linger_ms: 10_000,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
+            strict: true,
+        },
+        GlowConfig {
+            enabled: true,
+            color: 0x00D4FF,
+            thickness: 30,
+            linger_ms: 1_500,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
+            strict: false,
+        },
+        GlowConfig {
+            enabled: true,
+            color: 0x000000,
+            thickness: 48,
+            linger_ms: 0,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
+            strict: false,
+        },
     ] {
         assert_eq!(unpack_config(pack_config(&cfg)), Some(cfg));
     }
     assert_eq!(unpack_config(0), None);
-    let clamped = unpack_config(pack_config(&GlowConfig { enabled: true, color: 0x1FF_FFFF, thickness: 99, linger_ms: 99_999, strict: false }));
-    assert_eq!(clamped, Some(GlowConfig { enabled: true, color: 0xFF_FFFF, thickness: 24, linger_ms: 10_000, strict: false }));
+    let clamped = unpack_config(pack_config(&GlowConfig {
+        enabled: true,
+        color: 0x1FF_FFFF,
+        thickness: 99,
+        linger_ms: 99_999,
+        countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
+        strict: false,
+    }));
+    assert_eq!(
+        clamped,
+        Some(GlowConfig {
+            enabled: true,
+            color: 0xFF_FFFF,
+            thickness: MAX_THICKNESS,
+            linger_ms: 10_000,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
+            strict: false
+        })
+    );
 }
 
 #[test]
-fn a_new_linger_applies_to_the_next_end() {
+fn a_headless_gap_longer_than_linger_stays_lit() {
+    let mut h = Holders::new(1_500, 0);
+    h.begin(1);
+    h.end(1, 1_000);
+    assert!(h.session_open(1_000 + 10_000));
+    assert!(h.visible(1_000 + 10_000));
+    h.begin(2);
+    h.end(2, 20_000);
+    assert!(h.visible(20_000 + 10_000));
+    let fade_end = 20_000 + SESSION_IDLE_MS + 1_500;
+    assert!(h.visible(fade_end - 1));
+    assert!(!h.visible(fade_end));
+}
+
+#[test]
+fn release_fades_for_linger_and_does_not_wait_out_the_session_idle() {
+    let mut h = Holders::new(1_500, 0);
+    h.begin(1);
+    h.end(1, 1_000);
+    h.release(1_500);
+    assert!(!h.session_open(1_500));
+    assert!(h.visible(2_999));
+    assert!(!h.visible(3_000));
+}
+
+#[test]
+fn five_times_the_original_edge_fits_under_the_max() {
+    let cfg = config_from(Some(&json!({ "glow": { "thickness": 30 } })));
+    assert_eq!(cfg.thickness, 30);
+    assert!(MAX_THICKNESS > 30);
+    assert_eq!(DEFAULT_THICKNESS, 24);
+}
+
+#[test]
+fn linger_is_only_the_fade_after_the_session_releases() {
     let mut h = Holders::new(1_500, 0);
     h.set_linger(6_000);
     h.begin(1);
     h.end(1, 1_000);
-    assert!(h.visible(6_999));
-    assert!(!h.visible(7_000));
+    let idle_end = 1_000 + SESSION_IDLE_MS;
+    assert!(h.visible(idle_end - 1));
+    assert!(h.visible(idle_end + 5_999));
+    assert!(!h.visible(idle_end + 6_000));
 }
 
 #[test]
 fn the_capture_exclusion_setting_reads_and_travels_with_every_begin() {
     assert!(!config_from(None).strict);
-    assert!(config_from(Some(&json!({ "glow": { "require_capture_exclusion": true } }))).strict);
-    let cfg = GlowConfig { strict: true, ..GlowConfig::default() };
+    assert!(
+        config_from(Some(
+            &json!({ "glow": { "require_capture_exclusion": true } })
+        ))
+        .strict
+    );
+    let cfg = GlowConfig {
+        strict: true,
+        ..GlowConfig::default()
+    };
     assert_eq!(unpack_config(pack_config(&cfg)), Some(cfg));
-    let back = HelperArgs::parse(&HelperArgs { first_pid: None, config: cfg }.to_args()[1..]);
+    let back = HelperArgs::parse(
+        &HelperArgs {
+            first_pid: None,
+            config: cfg,
+        }
+        .to_args()[1..],
+    );
     assert!(back.config.strict);
 }
 
 #[test]
 fn a_strip_windows_will_not_exclude_is_kept_unless_exclusion_is_required() {
     assert!(keep_unexcluded_strip(&GlowConfig::default()));
-    assert!(!keep_unexcluded_strip(&GlowConfig { strict: true, ..GlowConfig::default() }));
+    assert!(!keep_unexcluded_strip(&GlowConfig {
+        strict: true,
+        ..GlowConfig::default()
+    }));
 }
 
 #[test]
@@ -278,9 +466,15 @@ fn a_capture_hide_ends_when_shown_timed_out_or_its_process_died() {
     h.show(7);
     assert!(!h.active(200, |_| true));
     h.hide(8, 100);
-    assert!(!h.active(100 + HIDE_MAX_MS, |_| true), "a hide never outlives its deadline");
+    assert!(
+        !h.active(100 + HIDE_MAX_MS, |_| true),
+        "a hide never outlives its deadline"
+    );
     h.hide(9, 0);
-    assert!(!h.active(10, |p| p != 9), "a dead capturer can't keep the frame hidden");
+    assert!(
+        !h.active(10, |p| p != 9),
+        "a dead capturer can't keep the frame hidden"
+    );
 }
 
 #[test]

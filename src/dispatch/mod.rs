@@ -40,11 +40,17 @@ pub(crate) fn dispatch(
     let headed = context.is_headed();
     crate::command_policy::preflight_headless(&cmd, headed)?;
     crate::focus_guard::guard(name, headed, || {
-        // Inside the guard on purpose: if showing the frame ever moved the
-        // foreground, the guard would see it and say so.
-        let _glow = crate::glow::begin(name);
-        dispatch_command(cmd, adapter, permission_report, context)
-            .map_err(|error| disposition::settle_unknown_delivery(error, read_only))
+        let prepared = if cmd.is_mutating() {
+            Some(crate::glow::prepare(name)?)
+        } else {
+            None
+        };
+        let result = dispatch_command(cmd, adapter, permission_report, context)
+            .map_err(|error| disposition::settle_unknown_delivery(error, read_only));
+        match prepared {
+            Some(prepared) => crate::glow::attach(result, prepared),
+            None => result,
+        }
     })
 }
 

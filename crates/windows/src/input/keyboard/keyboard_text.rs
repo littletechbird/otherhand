@@ -38,7 +38,9 @@ pub(crate) fn synthesize_text(
     let chunk_count = preflight_text(text, deadline)?;
     let chunks = text_chunks(text, Some(chunk_count))?;
     let total = chunks.len();
+    let gate = super::foreground_gate::ForegroundGate::arm()?;
     for (delivered_chunks, chunk) in chunks.into_iter().enumerate() {
+        gate.ensure(delivered_chunks > 0)?;
         ensure_chunk_budget(deadline, total, delivered_chunks)?;
         verify_target(deadline).map_err(|error| {
             let disposition = if delivered_chunks == 0 {

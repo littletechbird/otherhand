@@ -40,6 +40,15 @@ impl Plain {
     pub(crate) fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).unwrap_or("")
     }
+
+    pub(crate) fn into_string(mut self) -> String {
+        let bytes = std::mem::take(&mut self.0);
+        String::from_utf8(bytes).unwrap_or_else(|err| {
+            let mut bytes = err.into_bytes();
+            bytes.fill(0);
+            String::new()
+        })
+    }
     #[cfg(test)]
     pub(crate) fn char_count(&self) -> usize {
         self.as_str().chars().count()
@@ -56,8 +65,14 @@ impl Drop for Plain {
 /// or just the image (`app://notepad.exe`); web origins compare exactly.
 pub(crate) fn origin_allowed(allowed: &[String], candidates: &[String]) -> bool {
     allowed.iter().any(|a| {
-        let a = a.trim().trim_end_matches('/').to_lowercase().replace('\\', "/");
-        candidates.iter().any(|c| c.trim_end_matches('/').to_lowercase().replace('\\', "/") == a)
+        let a = a
+            .trim()
+            .trim_end_matches('/')
+            .to_lowercase()
+            .replace('\\', "/");
+        candidates
+            .iter()
+            .any(|c| c.trim_end_matches('/').to_lowercase().replace('\\', "/") == a)
     })
 }
 
@@ -70,6 +85,7 @@ pub(crate) fn origin_allowed(allowed: &[String], candidates: &[String]) -> bool 
 pub(crate) struct Resolved {
     pub plain: Plain,
     pub fill_visible: bool,
+    pub allowed: Vec<String>,
 }
 
 #[cfg(test)]
@@ -77,26 +93,44 @@ pub(crate) fn resolve(dir: &Path, handle: &str, origins: &[String]) -> Result<Pl
     resolve_entry(dir, handle, origins).map(|r| r.plain)
 }
 
-pub(crate) fn resolve_entry(dir: &Path, handle: &str, origins: &[String]) -> Result<Resolved, VaultError> {
+pub(crate) fn resolve_entry(
+    dir: &Path,
+    handle: &str,
+    origins: &[String],
+) -> Result<Resolved, VaultError> {
     let primary = origins.first().cloned().unwrap_or_default();
     let fail = |e: VaultError| {
-        audit::append(e.as_str(), &[("handle", handle), ("origin", &primary), ("via", "agent-desktop")]);
+        audit::append(
+            e.as_str(),
+            &[
+                ("handle", handle),
+                ("origin", &primary),
+                ("via", "agent-desktop"),
+            ],
+        );
         e
     };
     if !handle.starts_with(HANDLE_PREFIX) {
         return Err(fail(VaultError::Miss));
     }
-    let key_bytes = std::fs::read(dir.join("machine.key")).map_err(|_| fail(VaultError::NoVault))?;
+    let key_bytes =
+        std::fs::read(dir.join("machine.key")).map_err(|_| fail(VaultError::NoVault))?;
     let key = FernetKey::from_encoded(&key_bytes).map_err(|_| fail(VaultError::BadFormat))?;
     let store = std::fs::read(dir.join("vault.enc.json")).map_err(|_| fail(VaultError::NoVault))?;
-    let mut decrypted = key.decrypt(&store).map_err(|_| fail(VaultError::BadFormat))?;
+    let mut decrypted = key
+        .decrypt(&store)
+        .map_err(|_| fail(VaultError::BadFormat))?;
     let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&decrypted);
     decrypted.iter_mut().for_each(|b| *b = 0);
     let entries = parsed.map_err(|_| fail(VaultError::BadFormat))?;
     let Some(entry) = entries.get(handle) else {
         return Err(fail(VaultError::Miss));
     };
-    if entry.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if entry
+        .get("revoked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return Err(fail(VaultError::Revoked));
     }
     if let Some(exp) = entry.get("expires_at").and_then(|v| v.as_f64()) {
@@ -111,7 +145,11 @@ pub(crate) fn resolve_entry(dir: &Path, handle: &str, origins: &[String]) -> Res
     let allowed: Vec<String> = entry
         .get("allowlisted_origins")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     if allowed.is_empty() {
         return Err(fail(VaultError::NoOrigins));
@@ -119,15 +157,35 @@ pub(crate) fn resolve_entry(dir: &Path, handle: &str, origins: &[String]) -> Res
     if !origin_allowed(&allowed, origins) {
         return Err(fail(VaultError::OriginDenied));
     }
-    let ciphertext = entry.get("ciphertext").and_then(|v| v.as_str()).unwrap_or("");
+    let ciphertext = entry
+        .get("ciphertext")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if ciphertext.is_empty() {
         return Err(fail(VaultError::Revoked));
     }
-    let fill_visible = entry.get("fill_visible").and_then(|v| v.as_bool()).unwrap_or(false);
-    let plain = key.decrypt(ciphertext.as_bytes()).map_err(|_| fail(VaultError::BadFormat))?;
+    let fill_visible = entry
+        .get("fill_visible")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let plain = key
+        .decrypt(ciphertext.as_bytes())
+        .map_err(|_| fail(VaultError::BadFormat))?;
     let label = entry.get("label").and_then(|v| v.as_str()).unwrap_or("");
-    audit::append("resolve_ok", &[("handle", handle), ("origin", &primary), ("label", label), ("via", "agent-desktop")]);
-    Ok(Resolved { plain: Plain(plain), fill_visible })
+    audit::append(
+        "resolve_ok",
+        &[
+            ("handle", handle),
+            ("origin", &primary),
+            ("label", label),
+            ("via", "agent-desktop"),
+        ],
+    );
+    Ok(Resolved {
+        plain: Plain(plain),
+        fill_visible,
+        allowed,
+    })
 }
 
 #[cfg(test)]
@@ -135,42 +193,93 @@ mod tests {
     use super::*;
 
     fn fixtures() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("secret").join("fixtures")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("secret")
+            .join("fixtures")
     }
 
     fn handle(name: &str) -> String {
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(fixtures().join("handles.json")).unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(fixtures().join("handles.json")).unwrap(),
+        )
+        .unwrap();
         v[name].as_str().unwrap().to_string()
     }
 
     #[test]
     fn decrypts_a_dark_room_vault_written_by_the_python_reference() {
-        let p = resolve(&fixtures(), &handle("notepad"), &["app://c:/windows/notepad.exe".into(), "app://notepad.exe".into()]).unwrap();
+        let p = resolve(
+            &fixtures(),
+            &handle("notepad"),
+            &[
+                "app://c:/windows/notepad.exe".into(),
+                "app://notepad.exe".into(),
+            ],
+        )
+        .unwrap();
         assert_eq!(p.as_str(), "CANARY-not-a-secret-7f3a");
         assert_eq!(p.char_count(), 24);
     }
 
     #[test]
     fn wrong_origin_is_denied() {
-        let e = resolve(&fixtures(), &handle("notepad"), &["app://calc.exe".into()]).err().unwrap();
+        let e = resolve(&fixtures(), &handle("notepad"), &["app://calc.exe".into()])
+            .err()
+            .unwrap();
         assert_eq!(e, VaultError::OriginDenied);
-        let e = resolve(&fixtures(), &handle("web"), &["https://example.com.evil.test".into()]).err().unwrap();
+        let e = resolve(
+            &fixtures(),
+            &handle("web"),
+            &["https://example.com.evil.test".into()],
+        )
+        .err()
+        .unwrap();
         assert_eq!(e, VaultError::OriginDenied);
-        assert!(resolve(&fixtures(), &handle("web"), &["https://example.com/".into()]).is_ok());
+        assert!(
+            resolve(
+                &fixtures(),
+                &handle("web"),
+                &["https://example.com/".into()]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn empty_allowlist_revoked_and_unknown_handles_are_refused() {
-        assert_eq!(resolve(&fixtures(), &handle("open"), &["app://notepad.exe".into()]).err().unwrap(), VaultError::NoOrigins);
-        assert_eq!(resolve(&fixtures(), &handle("revoked"), &["app://notepad.exe".into()]).err().unwrap(), VaultError::Revoked);
-        assert_eq!(resolve(&fixtures(), "dr_sec_nope", &["app://notepad.exe".into()]).err().unwrap(), VaultError::Miss);
-        assert_eq!(resolve(&fixtures(), "plain-text", &[]).err().unwrap(), VaultError::Miss);
+        assert_eq!(
+            resolve(&fixtures(), &handle("open"), &["app://notepad.exe".into()])
+                .err()
+                .unwrap(),
+            VaultError::NoOrigins
+        );
+        assert_eq!(
+            resolve(
+                &fixtures(),
+                &handle("revoked"),
+                &["app://notepad.exe".into()]
+            )
+            .err()
+            .unwrap(),
+            VaultError::Revoked
+        );
+        assert_eq!(
+            resolve(&fixtures(), "dr_sec_nope", &["app://notepad.exe".into()])
+                .err()
+                .unwrap(),
+            VaultError::Miss
+        );
+        assert_eq!(
+            resolve(&fixtures(), "plain-text", &[]).err().unwrap(),
+            VaultError::Miss
+        );
     }
 
     #[test]
     fn a_missing_vault_is_reported_without_detail() {
-        let e = resolve(Path::new("/nonexistent/vault"), "dr_sec_x", &[]).err().unwrap();
+        let e = resolve(Path::new("/nonexistent/vault"), "dr_sec_x", &[])
+            .err()
+            .unwrap();
         assert_eq!(e, VaultError::NoVault);
     }
 }

@@ -92,6 +92,25 @@ observation, actions and capture there fail or return nothing.
   the app reformats reads as failed. See `references/troubleshooting.md`.
 - **Unsigned binary warnings are expected.** See `references/troubleshooting.md`.
 
+## Screen-edge glow
+
+A cyan frame is drawn around each monitor before Otherhand takes focus or sends input. The command waits until the helper confirms the strips are visible, then waits out `countdown_ms` (default 1500, never under 1000) while the frame brightens in three steps. If the frame cannot be shown, the command returns `GLOW_UNAVAILABLE` and does not run. The result of a command that acts carries `data.glow` with `shown`, `mode` and `countdown_ms`.
+
+The frame then stays up for the work session, including later headless commands. Switching windows does not turn it off. It releases when `session end` runs, or when 30 seconds pass with no new acting command after the last client process has gone. `linger_ms` is only the fade after that release.
+
+There is no `--no-glow` flag, and `"enabled": false` in config does not turn the warning off. From an interactive console the person can run `otherhand glow set --off` and type `GLOW OFF`. Focus-taking commands then refuse until `otherhand glow set --on`. An agent cannot make that switch.
+
+```sh
+otherhand glow show
+otherhand glow set --thickness 30 --color #FF8800 --countdown-ms 2000
+otherhand glow reset
+```
+
+- thickness: integer from 2 to 48. Default 24.
+- color: hex `#RGB` or `#RRGGBB`. Default `#00D4FF`.
+- countdown_ms: visible wait before focus or input, 1000 to 10000. Default 1500.
+- linger_ms: fade after the work session releases, at most 10000. Default 1500.
+
 ## What differs on Windows
 
 - Ref actions are semantic UI Automation calls in headless and `--headed` mode, except `right-click`, `double-click`, `triple-click`, `type` and `focus`, which are physical or take focus and need `--headed`. `type` into a Chromium or Electron window also works headless; see `references/chromium-and-electron.md`.

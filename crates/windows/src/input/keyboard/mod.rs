@@ -53,6 +53,7 @@ pub(crate) fn reject_standalone_key_state(
     .with_disposition(agent_desktop_core::DeliverySemantics::not_delivered()))
 }
 
+pub(super) mod foreground_gate;
 pub(super) mod keyboard_event;
 pub(super) mod keyboard_map;
 pub(crate) mod keyboard_message;

@@ -34,12 +34,6 @@ pub(crate) struct Cli {
         help = "Fail on trace setup/pre-action write errors"
     )]
     pub trace_strict: bool,
-    #[arg(
-        long = "no-glow",
-        global = true,
-        help = "Don't draw the screen-border glow while this command acts"
-    )]
-    pub no_glow: bool,
     #[command(flatten)]
     pub interaction: InteractionArgs,
     #[command(flatten)]

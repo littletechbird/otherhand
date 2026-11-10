@@ -7,7 +7,9 @@
 //! for this process, so nothing waits on it.
 //!
 //! Helper: one per desktop session (a named mutex). It keeps the frame up
-//! while any holder lives plus the linger time, pulses it on a 40 ms timer,
+//! for the work session: while a command is acting and across later commands
+//! until that session releases, then for the linger fade. The frame pulses
+//! on a 40 ms timer,
 //! and leaves after a minute with nothing to show. The frame strips are
 //! `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
 //! WS_EX_TOPMOST` popups, are shown only with `SWP_NOACTIVATE`, answer
@@ -23,9 +25,9 @@
 //! message and has to be answered before the command takes its picture.
 
 use super::{
-    CONTROL_CLASS, CaptureHides, CaptureMode, FRAME_CLASS, GlowConfig, HelperArgs, Holders, Rect, capture_mode,
-    keep_unexcluded_strip, pack_config, pulse_alpha, rebuild_due, render_strip, scaled_thickness, strips, unix_ms,
-    unpack_config, write_note,
+    CONTROL_CLASS, CaptureHides, CaptureMode, FRAME_CLASS, GlowConfig, HelperArgs, Holders, Rect,
+    capture_mode, keep_unexcluded_strip, pack_config, rebuild_due, render_strip, scaled_thickness,
+    strips, unix_ms, unpack_config, write_note,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -34,40 +36,47 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT,
+    SIZE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Dwm::{DwmFlush, DwmIsCompositionEnabled};
 use windows_sys::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC,
-    CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetMonitorInfoW, HBITMAP,
-    HDC, HGDIOBJ, HMONITOR, MONITORINFO, ReleaseDC, SelectObject,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject,
+    EnumDisplayMonitors, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO,
+    ReleaseDC, SelectObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateMutexW, CreateProcessW, DETACHED_PROCESS, GetCurrentProcessId,
-    GetExitCodeProcess, OpenProcess, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_FORCEOFFFEEDBACK,
-    STARTUPINFOW,
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CreateMutexW, CreateProcessW, DETACHED_PROCESS,
+    GetCurrentProcessId, GetExitCodeProcess, OpenProcess, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
+    SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW, GetMessageW, GetSystemMetrics,
-    GetClassNameW, GetForegroundWindow, GetWindowDisplayAffinity, GetWindowRect, GetWindowThreadProcessId, HTTRANSPARENT, HWND_MESSAGE, HWND_TOPMOST, IsWindowVisible,
-    MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SM_REMOTESESSION, SMTO_ABORTIFHUNG,
-    SMTO_BLOCK, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageTimeoutW,
-    SetTimer, SetWindowDisplayAffinity, SetWindowPos, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
-    WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW, GetClassNameW,
+    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowDisplayAffinity, GetWindowRect,
+    GetWindowThreadProcessId, HTTRANSPARENT, HWND_MESSAGE, HWND_TOPMOST, IsWindowVisible,
+    MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SM_REMOTESESSION,
+    SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SendMessageTimeoutW, SetTimer, SetWindowDisplayAffinity, SetWindowPos,
+    TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WM_APP,
+    WM_MOUSEACTIVATE, WM_NCHITTEST, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const MSG_BEGIN: u32 = WM_APP + 0x4F1;
+pub(super) const MSG_BEGIN: u32 = WM_APP + 0x4F1;
 const MSG_END: u32 = WM_APP + 0x4F2;
 /// Sent (not posted) by a command about to capture; answered once the frame
 /// is off the screen.
 const MSG_HIDE: u32 = WM_APP + 0x4F3;
 /// Posted by that command when its capture is done.
 const MSG_SHOW: u32 = WM_APP + 0x4F4;
+/// The agent ended the work session. The frame fades for `linger_ms`.
+const MSG_RELEASE: u32 = WM_APP + 0x4F5;
 /// Answers to `MSG_HIDE`.
 const HIDE_NOTHING: usize = 1;
 const HIDE_DONE: usize = 2;
@@ -77,7 +86,54 @@ const SPAWN_NOTE: &str = "glow spawn.json";
 const TICK_MS: u32 = 40;
 const PRUNE_EVERY_MS: u64 = 250;
 const RAISE_EVERY_MS: u64 = 500;
-const MUTEX_NAME: &str = "Local\\OtherhandGlowHelper";
+fn mutex_name() -> String {
+    super::warn::mutex_name(current_user_sid().as_deref())
+}
+
+fn current_user_sid() -> Option<String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut needed = 0u32;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        if needed == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        let ok = GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        );
+        if ok == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+        let mut raw = std::ptr::null_mut();
+        if ConvertSidToStringSidW(user.User.Sid, &mut raw) == 0 || raw.is_null() {
+            CloseHandle(token);
+            return None;
+        }
+        let mut len = 0usize;
+        while len < 200 && *raw.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(raw, len));
+        LocalFree(raw.cast());
+        CloseHandle(token);
+        Some(text)
+    }
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -85,7 +141,14 @@ fn wide(s: &str) -> Vec<u16> {
 
 fn control_window() -> HWND {
     let class = wide(CONTROL_CLASS);
-    unsafe { FindWindowExW(HWND_MESSAGE, std::ptr::null_mut(), class.as_ptr(), std::ptr::null()) }
+    unsafe {
+        FindWindowExW(
+            HWND_MESSAGE,
+            std::ptr::null_mut(),
+            class.as_ptr(),
+            std::ptr::null(),
+        )
+    }
 }
 
 /// The settings travel with every begin (see `pack_config`).
@@ -93,13 +156,11 @@ fn config_param(cfg: &GlowConfig) -> LPARAM {
     pack_config(cfg) as LPARAM
 }
 
-pub(super) fn client_begin(cfg: &GlowConfig) {
-    let pid = unsafe { GetCurrentProcessId() };
+pub(super) fn client_release() {
     let ctl = control_window();
-    if !ctl.is_null() && unsafe { PostMessageW(ctl, MSG_BEGIN, pid as WPARAM, config_param(cfg)) } != 0 {
-        return;
+    if !ctl.is_null() {
+        unsafe { PostMessageW(ctl, MSG_RELEASE, 0, 0) };
     }
-    spawn_helper(&HelperArgs { first_pid: Some(pid), config: *cfg });
 }
 
 pub(super) fn client_end() {
@@ -108,8 +169,8 @@ pub(super) fn client_end() {
     if !ctl.is_null() {
         unsafe { PostMessageW(ctl, MSG_END, pid as WPARAM, 0) };
     }
-    // No helper yet (still starting): it holds for this pid and lets go when
-    // the pid check sees this process gone.
+    // No helper yet (still starting): the pid check drops this client, and the
+    // work session idles out if no later command arrives.
 }
 
 /// Before a capture: asks the helper to take down a frame that isn't
@@ -136,7 +197,15 @@ pub(super) fn client_capture_begin() -> (bool, Vec<Rect>) {
     let pid = unsafe { GetCurrentProcessId() };
     let mut answer: usize = 0;
     let sent = unsafe {
-        SendMessageTimeoutW(ctl, MSG_HIDE, pid as WPARAM, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, HIDE_ANSWER_MS, &mut answer)
+        SendMessageTimeoutW(
+            ctl,
+            MSG_HIDE,
+            pid as WPARAM,
+            0,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            HIDE_ANSWER_MS,
+            &mut answer,
+        )
     };
     if sent != 0 && answer == HIDE_DONE {
         // The helper flushed already; one more frame makes sure this
@@ -163,7 +232,14 @@ pub(super) fn leftover_strips() -> Vec<Rect> {
     let mut out = Vec::new();
     let mut after: HWND = std::ptr::null_mut();
     for _ in 0..256 {
-        let h = unsafe { FindWindowExW(std::ptr::null_mut(), after, class.as_ptr(), std::ptr::null()) };
+        let h = unsafe {
+            FindWindowExW(
+                std::ptr::null_mut(),
+                after,
+                class.as_ptr(),
+                std::ptr::null(),
+            )
+        };
         if h.is_null() {
             break;
         }
@@ -172,12 +248,19 @@ pub(super) fn leftover_strips() -> Vec<Rect> {
             continue;
         }
         let mut affinity = 0u32;
-        if unsafe { GetWindowDisplayAffinity(h, &mut affinity) } != 0 && affinity == WDA_EXCLUDEFROMCAPTURE {
+        if unsafe { GetWindowDisplayAffinity(h, &mut affinity) } != 0
+            && affinity == WDA_EXCLUDEFROMCAPTURE
+        {
             continue;
         }
         let mut r: RECT = unsafe { std::mem::zeroed() };
         if unsafe { GetWindowRect(h, &mut r) } != 0 {
-            out.push(Rect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top });
+            out.push(Rect {
+                x: r.left,
+                y: r.top,
+                w: r.right - r.left,
+                h: r.bottom - r.top,
+            });
         }
     }
     out
@@ -187,8 +270,10 @@ pub(super) fn leftover_strips() -> Vec<Rect> {
 /// caller's stdout open, and with no console of its own.
 static SPAWNED: AtomicBool = AtomicBool::new(false);
 
-fn spawn_helper(args: &HelperArgs) {
-    let Ok(exe) = std::env::current_exe() else { return };
+pub(super) fn spawn_helper(args: &HelperArgs) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
     let mut line = format!("\"{}\"", exe.display());
     for a in args.to_args() {
         line.push(' ');
@@ -214,7 +299,11 @@ fn spawn_helper(args: &HelperArgs) {
             &mut info,
         )
     };
-    let error = if ok == 0 { unsafe { GetLastError() } } else { 0 };
+    let error = if ok == 0 {
+        unsafe { GetLastError() }
+    } else {
+        0
+    };
     SPAWNED.store(ok != 0, Ordering::SeqCst);
     if ok != 0 {
         unsafe {
@@ -233,6 +322,7 @@ fn spawn_helper(args: &HelperArgs) {
             "exe": exe.display().to_string(),
         }),
     );
+    ok != 0
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -259,18 +349,33 @@ thread_local! {
 }
 
 unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    if !matches!(msg, MSG_BEGIN | MSG_END | MSG_HIDE | MSG_SHOW | WM_TIMER) {
+    if !matches!(
+        msg,
+        MSG_BEGIN | MSG_END | MSG_RELEASE | MSG_HIDE | MSG_SHOW | WM_TIMER
+    ) {
         return unsafe { DefWindowProcW(hwnd, msg, w, l) };
     }
     HELPER.with(|cell| {
         // Busy (a sent hide arriving while the helper is mid-update): say so,
         // and the command masks whatever is showing.
-        let Ok(mut slot) = cell.try_borrow_mut() else { return 0 };
-        let Some(helper) = slot.as_mut() else { return 0 };
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return 0;
+        };
+        let Some(helper) = slot.as_mut() else {
+            return 0;
+        };
         let t = helper.now();
         match msg {
-            MSG_BEGIN => helper.on_begin(w as u32, l as u64),
+            MSG_BEGIN => {
+                helper.on_begin(w as u32, l as u64);
+                let countdown = super::warn::countdown_from_packed(l as u64);
+                helper.holders.arm_countdown(t, countdown);
+                helper.update(t);
+                unsafe { DwmFlush() };
+                return helper.visible_ack() as LRESULT;
+            }
             MSG_END => helper.holders.end(w as u32, t),
+            MSG_RELEASE => helper.holders.release(t),
             MSG_HIDE => return helper.on_hide(w as u32, t) as LRESULT,
             MSG_SHOW => helper.hides.show(w as u32),
             _ => helper.on_tick(t),
@@ -285,7 +390,10 @@ static REGISTER: Once = Once::new();
 fn register_classes() {
     REGISTER.call_once(|| {
         for (name, proc_) in [
-            (FRAME_CLASS, frame_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT),
+            (
+                FRAME_CLASS,
+                frame_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+            ),
             (CONTROL_CLASS, control_proc),
         ] {
             let class = wide(name);
@@ -310,13 +418,23 @@ struct Strip {
 }
 
 impl Strip {
-    fn create(rect: Rect, monitor: Rect, t: i32, cfg: &GlowConfig, errors: &mut Errors) -> Option<Self> {
+    fn create(
+        rect: Rect,
+        monitor: Rect,
+        t: i32,
+        cfg: &GlowConfig,
+        errors: &mut Errors,
+    ) -> Option<Self> {
         let color = cfg.color;
         let class = wide(FRAME_CLASS);
         let title = wide("Otherhand glow");
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TOPMOST,
                 class.as_ptr(),
                 title.as_ptr(),
                 WS_POPUP,
@@ -356,7 +474,16 @@ impl Strip {
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
         let dc = unsafe { CreateCompatibleDC(std::ptr::null_mut()) };
-        let bitmap = unsafe { CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0) };
+        let bitmap = unsafe {
+            CreateDIBSection(
+                dc,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
         if dc.is_null() || bitmap.is_null() || bits.is_null() {
             errors.dib = unsafe { GetLastError() }.max(1);
             unsafe {
@@ -372,13 +499,26 @@ impl Strip {
         }
         unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u32>(), pixels.len()) };
         let old = unsafe { SelectObject(dc, bitmap) };
-        Some(Self { hwnd, rect, excluded, dc, bitmap, old })
+        Some(Self {
+            hwnd,
+            rect,
+            excluded,
+            dc,
+            bitmap,
+            old,
+        })
     }
 
     fn present(&self, alpha: u8, errors: &mut Errors) -> bool {
         let screen = unsafe { GetDC(std::ptr::null_mut()) };
-        let pos = POINT { x: self.rect.x, y: self.rect.y };
-        let size = SIZE { cx: self.rect.w, cy: self.rect.h };
+        let pos = POINT {
+            x: self.rect.x,
+            y: self.rect.y,
+        };
+        let size = SIZE {
+            cx: self.rect.w,
+            cy: self.rect.h,
+        };
         let src = POINT { x: 0, y: 0 };
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
@@ -386,7 +526,11 @@ impl Strip {
             SourceConstantAlpha: alpha,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        let ok = unsafe { UpdateLayeredWindow(self.hwnd, screen, &pos, &size, self.dc, &src, 0, &blend, ULW_ALPHA) };
+        let ok = unsafe {
+            UpdateLayeredWindow(
+                self.hwnd, screen, &pos, &size, self.dc, &src, 0, &blend, ULW_ALPHA,
+            )
+        };
         if ok == 0 {
             errors.update_layered_window = unsafe { GetLastError() }.max(1);
         }
@@ -396,8 +540,22 @@ impl Strip {
 
     /// Back to the top of the topmost band, shown or hidden, never activated.
     fn place(&self, shown: bool) {
-        let show = if shown { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
-        unsafe { SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | show) };
+        let show = if shown {
+            SWP_SHOWWINDOW
+        } else {
+            SWP_HIDEWINDOW
+        };
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | show,
+            )
+        };
     }
 
     fn visible(&self) -> bool {
@@ -416,7 +574,12 @@ impl Drop for Strip {
     }
 }
 
-unsafe extern "system" fn collect_monitor(m: HMONITOR, _dc: HDC, _r: *mut RECT, data: LPARAM) -> windows_sys::core::BOOL {
+unsafe extern "system" fn collect_monitor(
+    m: HMONITOR,
+    _dc: HDC,
+    _r: *mut RECT,
+    data: LPARAM,
+) -> windows_sys::core::BOOL {
     let out = unsafe { &mut *(data as *mut Vec<(Rect, u32)>) };
     let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
@@ -426,7 +589,15 @@ unsafe extern "system" fn collect_monitor(m: HMONITOR, _dc: HDC, _r: *mut RECT, 
         if unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) } != 0 {
             dx = 96;
         }
-        out.push((Rect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top }, dx));
+        out.push((
+            Rect {
+                x: r.left,
+                y: r.top,
+                w: r.right - r.left,
+                h: r.bottom - r.top,
+            },
+            dx,
+        ));
     }
     1
 }
@@ -434,7 +605,12 @@ unsafe extern "system" fn collect_monitor(m: HMONITOR, _dc: HDC, _r: *mut RECT, 
 fn monitors() -> Vec<(Rect, u32)> {
     let mut out: Vec<(Rect, u32)> = Vec::new();
     unsafe {
-        EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(collect_monitor), &mut out as *mut _ as LPARAM)
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(collect_monitor),
+            &mut out as *mut _ as LPARAM,
+        )
     };
     out
 }
@@ -529,9 +705,21 @@ impl Helper {
         self.started.elapsed().as_millis() as u64
     }
 
+    fn visible_ack(&self) -> usize {
+        let alpha = self.holders.frame_alpha(self.now());
+        if self.shown && alpha > 0 && !self.frame.is_empty() {
+            super::warn::pack_ack(self.frame.len() as u32, alpha)
+        } else {
+            0
+        }
+    }
+
     fn on_begin(&mut self, pid: u32, packed: u64) {
         if let Some(next) = unpack_config(packed) {
-            if next.color != self.cfg.color || next.thickness != self.cfg.thickness || next.strict != self.cfg.strict {
+            if next.color != self.cfg.color
+                || next.thickness != self.cfg.thickness
+                || next.strict != self.cfg.strict
+            {
                 self.frame.clear();
                 self.shown = false;
                 self.last_build = None;
@@ -551,7 +739,10 @@ impl Helper {
     }
 
     fn mode(&self) -> Option<CaptureMode> {
-        capture_mode(self.frame.iter().filter(|s| s.excluded).count(), self.frame.len())
+        capture_mode(
+            self.frame.iter().filter(|s| s.excluded).count(),
+            self.frame.len(),
+        )
     }
 
     /// Takes a frame that would show in a capture off the screen and waits
@@ -588,7 +779,7 @@ impl Helper {
                 self.shown = false;
                 self.dirty = true;
             }
-            let alpha = pulse_alpha(t);
+            let alpha = self.holders.frame_alpha(t);
             let errors = &mut self.errors;
             let before = self.frame.len();
             self.frame.retain(|s| s.present(alpha, errors));
@@ -627,7 +818,11 @@ impl Helper {
         if self.dirty {
             self.dirty = false;
             let state = if self.frame.is_empty() {
-                if self.last_build.is_some() { "failed" } else { "idle" }
+                if self.last_build.is_some() {
+                    "failed"
+                } else {
+                    "idle"
+                }
             } else if self.shown {
                 "shown"
             } else {
@@ -649,6 +844,7 @@ impl Helper {
             "strips_visible": self.frame.iter().filter(|s| s.visible()).count(),
             "require_capture_exclusion": self.cfg.strict,
             "color": super::format_color(self.cfg.color),
+            "session_open": self.holders.session_open(self.now()),
             "errors": {
                 "create_window": self.errors.create_window,
                 "set_display_affinity": self.errors.set_display_affinity,
@@ -662,7 +858,16 @@ impl Helper {
             "up_ms": self.now(),
         });
         // Only the fields that matter, so the pulse doesn't rewrite the file.
-        let key = format!("{state}|{}|{}|{}", doc["strips_made"], doc["strips_visible"], self.fg_seen.last().map(|v| v["at_unix_ms"].to_string()).unwrap_or_default());
+        let key = format!(
+            "{state}|{}|{}|{}|{}",
+            doc["strips_made"],
+            doc["strips_visible"],
+            doc["session_open"],
+            self.fg_seen
+                .last()
+                .map(|v| v["at_unix_ms"].to_string())
+                .unwrap_or_default()
+        );
         if key == self.last_note && state != "exited" {
             return;
         }
@@ -680,7 +885,7 @@ fn composition_enabled() -> bool {
 
 pub(super) fn run_helper(args: HelperArgs) -> ExitCode {
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let name = wide(MUTEX_NAME);
+    let name = wide(&mutex_name());
     let mutex = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
     if mutex.is_null() {
         return ExitCode::FAILURE;
@@ -692,7 +897,9 @@ pub(super) fn run_helper(args: HelperArgs) -> ExitCode {
             for _ in 0..50 {
                 let ctl = control_window();
                 if !ctl.is_null() {
-                    unsafe { PostMessageW(ctl, MSG_BEGIN, pid as WPARAM, config_param(&args.config)) };
+                    unsafe {
+                        PostMessageW(ctl, MSG_BEGIN, pid as WPARAM, config_param(&args.config))
+                    };
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
