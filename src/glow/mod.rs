@@ -39,8 +39,13 @@
 //!             "require_capture_exclusion": false } }
 //! ```
 //!
-//! `--no-glow` turns it off for one command. Everything here except the
-//! window code is plain logic and is tested on every platform.
+//! A command that takes focus or sends input waits until the helper has
+//! confirmed the frame is visible, then waits out `countdown_ms`, and refuses
+//! with `GLOW_UNAVAILABLE` if the frame cannot be shown. The warning cannot
+//! be switched off from config or from a flag. The person turns it off from
+//! an interactive console with `glow set --off`; focus-taking commands then
+//! refuse instead of running dark. Everything here except the window code is
+//! plain logic and is tested on every platform.
 
 // The drawing half only exists on Windows; elsewhere the logic is still
 // built and tested.
@@ -48,11 +53,24 @@
 
 mod work;
 
+mod person;
+pub(crate) mod settings;
+pub(crate) mod warn;
+
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[cfg(target_os = "windows")]
+mod windows_warn;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "live_tests.rs"]
+mod live_tests;
+
+use agent_desktop_core::AppError;
 use serde_json::Value;
 use std::collections::BTreeMap;
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub(crate) const DEFAULT_COLOR: u32 = 0x00D4FF;
@@ -90,6 +108,8 @@ pub(crate) struct GlowConfig {
     /// Frame width in pixels at 100% scaling.
     pub thickness: u32,
     pub linger_ms: u64,
+    /// How long the frame stays up, brightening, before focus or input.
+    pub countdown_ms: u64,
     /// Show nothing when the frame can't be excluded from capture, instead
     /// of hiding it for Otherhand's own captures.
     pub strict: bool,
@@ -102,6 +122,7 @@ impl Default for GlowConfig {
             color: DEFAULT_COLOR,
             thickness: DEFAULT_THICKNESS,
             linger_ms: DEFAULT_LINGER_MS,
+            countdown_ms: warn::DEFAULT_COUNTDOWN_MS,
             strict: false,
         }
     }
@@ -140,12 +161,8 @@ pub(crate) fn config_from(doc: Option<&Value>) -> GlowConfig {
     let Some(glow) = doc.and_then(|d| d.get("glow")) else {
         return cfg;
     };
-    if let Some(b) = glow.as_bool() {
-        cfg.enabled = b;
+    if glow.as_bool().is_some() {
         return cfg;
-    }
-    if let Some(b) = glow.get("enabled").and_then(Value::as_bool) {
-        cfg.enabled = b;
     }
     if let Some(c) = glow
         .get("color")
@@ -159,6 +176,9 @@ pub(crate) fn config_from(doc: Option<&Value>) -> GlowConfig {
     }
     if let Some(l) = glow.get("linger_ms").and_then(Value::as_u64) {
         cfg.linger_ms = l.min(10_000);
+    }
+    if let Some(ms) = glow.get("countdown_ms").and_then(Value::as_u64) {
+        cfg.countdown_ms = warn::clamp_countdown(ms);
     }
     if let Some(b) = glow
         .get("require_capture_exclusion")
@@ -213,103 +233,277 @@ fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
 }
 
-static FLAG_OFF: AtomicBool = AtomicBool::new(false);
-
-/// `--no-glow` on the command line.
-pub(crate) fn set_disabled_by_flag(off: bool) {
-    FLAG_OFF.store(off, Ordering::SeqCst);
-}
-
-/// Commands that act on the desktop. Reads, sessions, traces and the
-/// clipboard leave the screen alone and get no frame.
+/// Commands that take focus or send input. Kept as the name the rest of the
+/// crate already calls.
 pub(crate) fn glows_for(command: &str) -> bool {
-    matches!(
-        command,
-        "click"
-            | "double-click"
-            | "triple-click"
-            | "right-click"
-            | "type"
-            | "set-value"
-            | "fill-secret"
-            | "clear"
-            | "focus"
-            | "select"
-            | "toggle"
-            | "check"
-            | "uncheck"
-            | "expand"
-            | "collapse"
-            | "scroll"
-            | "scroll-to"
-            | "press"
-            | "key-down"
-            | "key-up"
-            | "hover"
-            | "drag"
-            | "mouse-move"
-            | "mouse-click"
-            | "mouse-down"
-            | "mouse-up"
-            | "mouse-wheel"
-            | "launch"
-            | "close-app"
-            | "focus-window"
-            | "open-system-surface"
-            | "resize-window"
-            | "move-window"
-            | "minimize"
-            | "maximize"
-            | "restore"
-            | "dismiss-notification"
-            | "dismiss-all-notifications"
-            | "notification-action"
-            | "batch"
-    )
+    warn::warning_required(command)
 }
 
 /// Begins and ends of the glow inside this process, so a batch and the
 /// commands inside it send the helper one begin and one end.
+#[cfg(not(test))]
 static DEPTH: AtomicU32 = AtomicU32::new(0);
+#[cfg(not(test))]
+static FRAME_SHOWN: AtomicBool = AtomicBool::new(false);
+static PREPARE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TEST_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn depth_load() -> u32 {
+    #[cfg(test)]
+    {
+        return TEST_DEPTH.with(|cell| cell.get());
+    }
+    #[cfg(not(test))]
+    {
+        DEPTH.load(Ordering::SeqCst)
+    }
+}
+
+fn depth_store(value: u32) {
+    #[cfg(test)]
+    {
+        TEST_DEPTH.with(|cell| cell.set(value));
+    }
+    #[cfg(not(test))]
+    {
+        DEPTH.store(value, Ordering::SeqCst);
+    }
+}
+
+fn depth_add(n: u32) -> u32 {
+    #[cfg(test)]
+    {
+        return TEST_DEPTH.with(|cell| {
+            let prev = cell.get();
+            cell.set(prev.saturating_add(n));
+            prev
+        });
+    }
+    #[cfg(not(test))]
+    {
+        DEPTH.fetch_add(n, Ordering::SeqCst)
+    }
+}
+
+fn depth_sub(n: u32) -> u32 {
+    #[cfg(test)]
+    {
+        return TEST_DEPTH.with(|cell| {
+            let prev = cell.get();
+            cell.set(prev.saturating_sub(n));
+            prev
+        });
+    }
+    #[cfg(not(test))]
+    {
+        DEPTH.fetch_sub(n, Ordering::SeqCst)
+    }
+}
+
+fn frame_shown_load() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_SHOWN.with(|cell| cell.get());
+    }
+    #[cfg(not(test))]
+    {
+        FRAME_SHOWN.load(Ordering::SeqCst)
+    }
+}
+
+fn frame_shown_store(value: bool) {
+    #[cfg(test)]
+    {
+        TEST_SHOWN.with(|cell| cell.set(value));
+    }
+    #[cfg(not(test))]
+    {
+        FRAME_SHOWN.store(value, Ordering::SeqCst);
+    }
+}
 
 /// Held while a command runs; dropping it ends this command's share of the
 /// glow. The work session stays open after that until it releases.
+#[derive(Debug)]
 pub(crate) struct GlowHold {
-    _private: (),
+    report: warn::GlowReport,
 }
 
 impl Drop for GlowHold {
     fn drop(&mut self) {
-        if DEPTH.fetch_sub(1, Ordering::SeqCst) == 1 {
+        if depth_sub(1) == 1 {
             platform_end();
         }
     }
 }
 
-/// Starts the glow for `command` when it acts on the desktop and the glow is
-/// on. Never fails a command: if the frame can't be shown, the command runs
-/// without it.
-pub(crate) fn begin(command: &str) -> Option<GlowHold> {
-    if FLAG_OFF.load(Ordering::SeqCst) || !glows_for(command) {
-        return None;
-    }
-    if DEPTH.fetch_add(1, Ordering::SeqCst) == 0 {
-        let cfg = load_config();
-        if !cfg.enabled {
-            DEPTH.fetch_sub(1, Ordering::SeqCst);
-            return None;
-        }
-        platform_begin(&cfg);
-    }
-    Some(GlowHold { _private: () })
+/// What an acting command attaches to its result, plus the hold that ends
+/// the command's share of the glow when dropped.
+#[derive(Debug)]
+pub(crate) struct Prepared {
+    pub report: warn::GlowReport,
+    hold: Option<GlowHold>,
 }
 
-#[cfg(target_os = "windows")]
-fn platform_begin(cfg: &GlowConfig) {
-    windows::client_begin(cfg);
+/// Shows the warning and waits out the countdown for a focus-taking command.
+/// A mutation that does not take focus gets a `not_required` report and no
+/// hold. A focus-taking command that cannot show the frame returns
+/// `GLOW_UNAVAILABLE` and does not run.
+pub(crate) fn prepare(command: &str) -> Result<Prepared, AppError> {
+    let _prepare = PREPARE.lock().unwrap_or_else(|error| error.into_inner());
+    if !glows_for(command) {
+        return Ok(Prepared {
+            report: warn::GlowReport::not_required(),
+            hold: None,
+        });
+    }
+    if depth_load() > 0 {
+        depth_add(1);
+        let shown = frame_shown_load();
+        let report = warn::GlowReport {
+            shown,
+            mode: if shown { "warning" } else { "unsupported" },
+            error: None,
+            countdown_ms: 0,
+        };
+        return Ok(Prepared {
+            report: report.clone(),
+            hold: Some(GlowHold { report }),
+        });
+    }
+    let cfg = load_config();
+    let outcome = if person::is_off() {
+        warn::ShowOutcome::PersonOff
+    } else {
+        platform_show(&cfg)
+    };
+    let decision = warn::decide(outcome, cfg.countdown_ms);
+    if let Some(block) = decision.block {
+        return Err(refusal(block));
+    }
+    if decision.wait_ms > 0 {
+        wait_countdown(decision.wait_ms);
+    }
+    frame_shown_store(decision.report.shown);
+    depth_store(1);
+    Ok(Prepared {
+        report: decision.report.clone(),
+        hold: Some(GlowHold {
+            report: decision.report,
+        }),
+    })
 }
-#[cfg(not(target_os = "windows"))]
-fn platform_begin(_cfg: &GlowConfig) {}
+
+fn refusal(block: warn::Block) -> AppError {
+    use agent_desktop_core::{AdapterError, DeliverySemantics, ErrorCode};
+    let (message, suggestion, mode, detail) = match block {
+        warn::Block::PersonOff => (
+            "The screen glow is off, so this command will not take focus or send input".to_string(),
+            "From an interactive console, run `otherhand glow set --on` to turn the warning back on",
+            "off",
+            "person_off".to_string(),
+        ),
+        warn::Block::NotShown { detail } => (
+            format!("The screen glow could not be shown ({detail}), so this command was not run"),
+            "The glow helper has to draw a visible frame before focus or input. Retry once the desktop can show it",
+            "unavailable",
+            detail,
+        ),
+    };
+    AdapterError::new(ErrorCode::GlowUnavailable, message)
+        .with_suggestion(suggestion.to_string())
+        .with_details(serde_json::json!({
+            "glow": { "shown": false, "mode": mode, "error": detail }
+        }))
+        .with_disposition(DeliverySemantics::not_delivered())
+        .into()
+}
+
+/// Puts `glow` on a mutating command's result. The hold ends when this
+/// returns, after the command body has finished.
+pub(crate) fn attach(
+    result: Result<Value, AppError>,
+    prepared: Prepared,
+) -> Result<Value, AppError> {
+    let note = prepared.report.json();
+    let attached = match result {
+        Ok(Value::Object(mut map)) => {
+            map.insert("glow".into(), note);
+            Ok(Value::Object(map))
+        }
+        Ok(other) => Ok(other),
+        Err(error) => Err(attach_error(error, note)),
+    };
+    drop(prepared);
+    attached
+}
+
+fn attach_error(error: AppError, note: Value) -> AppError {
+    use agent_desktop_core::{AdapterError, ErrorCode};
+    let mut adapter = match error {
+        AppError::Adapter(adapter) => adapter,
+        other => {
+            let code = if other.code() == ErrorCode::PermDenied.as_str() {
+                ErrorCode::PermDenied
+            } else {
+                ErrorCode::Internal
+            };
+            AdapterError::new(code, other.to_string())
+        }
+    };
+    let details = match adapter.details.take() {
+        Some(Value::Object(mut map)) => {
+            map.insert("glow".into(), note);
+            Value::Object(map)
+        }
+        Some(other) => serde_json::json!({ "detail": other, "glow": note }),
+        None => serde_json::json!({ "glow": note }),
+    };
+    adapter.details = Some(details);
+    AppError::Adapter(adapter)
+}
+
+fn platform_show(cfg: &GlowConfig) -> warn::ShowOutcome {
+    #[cfg(test)]
+    {
+        if let Some(scripted) = scripted_show() {
+            return scripted;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return match windows_warn::client_warn(cfg) {
+            Ok(ack) => warn::ShowOutcome::Shown(ack),
+            Err(error) => warn::ShowOutcome::Unavailable { error },
+        };
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cfg;
+        warn::ShowOutcome::Unsupported
+    }
+}
+
+#[cfg(test)]
+fn scripted_show() -> Option<warn::ShowOutcome> {
+    warn::scripted_outcome()
+}
+
+fn wait_countdown(ms: u64) {
+    #[cfg(test)]
+    {
+        warn::note_wait(ms);
+        if !warn::live_wait() {
+            return;
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
 
 #[cfg(target_os = "windows")]
 fn platform_end() {
@@ -477,7 +671,8 @@ pub(crate) fn helper_entry() -> Option<std::process::ExitCode> {
 /// a changed setting shows on the next command without restarting the
 /// helper: color in bits 0-23, a "set" mark in bit 24, thickness low 5 bits
 /// in bits 25-29, "require capture exclusion" in bit 30, thickness bit 5
-/// (32 and above) in bit 31, and the linger in bits 32-47.
+/// (32 and above) in bit 31, the linger in bits 32-47, and the countdown in
+/// bits 48-61.
 pub(crate) fn pack_config(cfg: &GlowConfig) -> u64 {
     let thickness = clamp_thickness(cfg.thickness);
     u64::from(cfg.color & 0xFF_FFFF)
@@ -486,6 +681,7 @@ pub(crate) fn pack_config(cfg: &GlowConfig) -> u64 {
         | u64::from(cfg.strict) << 30
         | u64::from(thickness >> 5) << 31
         | cfg.linger_ms.min(10_000) << 32
+        | warn::clamp_countdown(cfg.countdown_ms) << 48
 }
 
 pub(crate) fn unpack_config(v: u64) -> Option<GlowConfig> {
@@ -497,6 +693,7 @@ pub(crate) fn unpack_config(v: u64) -> Option<GlowConfig> {
         color: (v & 0xFF_FFFF) as u32,
         thickness: clamp_thickness((((v >> 25) & 0x1F) as u32) | ((((v >> 31) & 0x1) as u32) << 5)),
         linger_ms: ((v >> 32) & 0xFFFF).min(10_000),
+        countdown_ms: warn::countdown_from_packed(v),
         strict: v & (1 << 30) != 0,
     })
 }
@@ -568,6 +765,8 @@ pub(crate) struct Holders {
     last_visible_at: u64,
     linger_ms: u64,
     work: work::WorkSession,
+    countdown_until: Option<u64>,
+    countdown_ms: u64,
 }
 
 impl Holders {
@@ -581,6 +780,22 @@ impl Holders {
 
     pub(crate) fn set_linger(&mut self, linger_ms: u64) {
         self.linger_ms = linger_ms;
+    }
+
+    pub(crate) fn arm_countdown(&mut self, now: u64, countdown_ms: u64) {
+        let countdown_ms = warn::clamp_countdown(countdown_ms);
+        self.countdown_ms = countdown_ms;
+        self.countdown_until = Some(now.saturating_add(countdown_ms));
+    }
+
+    pub(crate) fn frame_alpha(&self, now: u64) -> u8 {
+        let pulse = pulse_alpha(now);
+        let Some(until) = self.countdown_until else {
+            return pulse;
+        };
+        let total = self.countdown_ms;
+        let elapsed = total.saturating_sub(until.saturating_sub(now));
+        warn::countdown_brightness(pulse, elapsed, total)
     }
 
     pub(crate) fn session_open(&self, now: u64) -> bool {

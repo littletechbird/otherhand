@@ -24,9 +24,13 @@ fn the_default_is_on_and_soft_cyan() {
 }
 
 #[test]
-fn the_config_can_turn_it_off_or_recolor_it() {
-    assert!(!config_from(Some(&json!({ "glow": false }))).enabled);
-    assert!(!config_from(Some(&json!({ "glow": { "enabled": false } }))).enabled);
+fn the_config_cannot_turn_the_warning_off() {
+    assert!(config_from(Some(&json!({ "glow": false }))).enabled);
+    assert!(config_from(Some(&json!({ "glow": { "enabled": false } }))).enabled);
+    assert_eq!(
+        config_from(Some(&json!({ "glow": { "countdown_ms": 50 } }))).countdown_ms,
+        crate::glow::warn::MIN_COUNTDOWN_MS
+    );
     let cfg = config_from(Some(
         &json!({ "glow": { "color": "#FF00FF", "thickness": 99, "linger_ms": 99_999 } }),
     ));
@@ -89,11 +93,22 @@ fn only_desktop_actions_glow() {
 }
 
 #[test]
-fn the_flag_turns_it_off_and_reads_never_hold_it() {
-    set_disabled_by_flag(true);
-    assert!(begin("click").is_none());
-    set_disabled_by_flag(false);
-    assert!(begin("snapshot").is_none());
+fn a_missing_frame_refuses_before_the_command_can_run() {
+    crate::glow::warn::script_fail("helper did not answer");
+    let error = prepare("click").expect_err("a dark frame must refuse");
+    assert_eq!(error.code(), "GLOW_UNAVAILABLE");
+    assert!(error.to_string().contains("could not be shown"));
+    crate::glow::warn::script_shown();
+}
+
+fn a_read_does_not_warn_and_a_click_waits_before_it_returns() {
+    assert!(prepare("snapshot").unwrap().hold.is_none());
+    crate::glow::warn::reset_wait();
+    let prepared = prepare("click").unwrap();
+    assert!(prepared.report.shown);
+    assert!(prepared.report.countdown_ms >= crate::glow::warn::MIN_COUNTDOWN_MS);
+    assert!(crate::glow::warn::waited_ms() >= crate::glow::warn::MIN_COUNTDOWN_MS);
+    drop(prepared);
 }
 
 #[test]
@@ -105,6 +120,7 @@ fn helper_args_round_trip() {
             color: 0x12AB34,
             thickness: 9,
             linger_ms: 700,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
             strict: true,
         },
     };
@@ -144,7 +160,10 @@ fn a_new_command_inside_the_linger_keeps_it_up_without_a_gap() {
     h.begin(11);
     assert!(h.visible(5_000));
     h.end(11, 5_000);
-    assert!(h.visible(5_000 + 10_000), "the gap is the work session, not linger_ms");
+    assert!(
+        h.visible(5_000 + 10_000),
+        "the gap is the work session, not linger_ms"
+    );
     let fade_end = 5_000 + SESSION_IDLE_MS + 1_500;
     assert!(h.visible(fade_end - 1));
     assert!(!h.visible(fade_end));
@@ -168,7 +187,10 @@ fn a_crashed_command_is_let_go_by_the_pid_check() {
     h.begin(10);
     h.prune(200, |_| false);
     assert!(h.pids().is_empty());
-    assert!(h.visible(10_000), "a dead client does not drop the session at linger_ms");
+    assert!(
+        h.visible(10_000),
+        "a dead client does not drop the session at linger_ms"
+    );
     assert!(!h.visible(200 + SESSION_IDLE_MS + 1_500));
 }
 
@@ -296,6 +318,7 @@ fn settings_survive_the_trip_in_a_message() {
             color: 0xFF00FF,
             thickness: 24,
             linger_ms: 10_000,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
             strict: true,
         },
         GlowConfig {
@@ -303,6 +326,7 @@ fn settings_survive_the_trip_in_a_message() {
             color: 0x00D4FF,
             thickness: 30,
             linger_ms: 1_500,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
             strict: false,
         },
         GlowConfig {
@@ -310,6 +334,7 @@ fn settings_survive_the_trip_in_a_message() {
             color: 0x000000,
             thickness: 48,
             linger_ms: 0,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
             strict: false,
         },
     ] {
@@ -321,6 +346,7 @@ fn settings_survive_the_trip_in_a_message() {
         color: 0x1FF_FFFF,
         thickness: 99,
         linger_ms: 99_999,
+        countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
         strict: false,
     }));
     assert_eq!(
@@ -330,6 +356,7 @@ fn settings_survive_the_trip_in_a_message() {
             color: 0xFF_FFFF,
             thickness: MAX_THICKNESS,
             linger_ms: 10_000,
+            countdown_ms: crate::glow::warn::DEFAULT_COUNTDOWN_MS,
             strict: false
         })
     );

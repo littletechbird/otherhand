@@ -27,6 +27,7 @@ pub enum AdResult {
     ErrAppUnresponsive = -16,
     ErrFocusStolen = -17,
     ErrFenced = -18,
+    ErrGlowUnavailable = -19,
 }
 
 const _: () = assert!(AdResult::ErrPermDenied as i32 == -1);
@@ -47,6 +48,7 @@ const _: () = assert!(AdResult::ErrAmbiguousTarget as i32 == -15);
 const _: () = assert!(AdResult::ErrAppUnresponsive as i32 == -16);
 const _: () = assert!(AdResult::ErrFocusStolen as i32 == -17);
 const _: () = assert!(AdResult::ErrFenced as i32 == -18);
+const _: () = assert!(AdResult::ErrGlowUnavailable as i32 == -19);
 
 enum MessageSource {
     Owned(CString),
@@ -120,6 +122,7 @@ fn error_code_to_result(code: &ErrorCode) -> AdResult {
         ErrorCode::AppUnresponsive => AdResult::ErrAppUnresponsive,
         ErrorCode::FocusStolen => AdResult::ErrFocusStolen,
         ErrorCode::Fenced => AdResult::ErrFenced,
+        ErrorCode::GlowUnavailable => AdResult::ErrGlowUnavailable,
     }
 }
 

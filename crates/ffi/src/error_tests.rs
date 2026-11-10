@@ -74,6 +74,7 @@ fn error_code_origin(result: AdResult) -> Option<ErrorCode> {
         AdResult::ErrAppUnresponsive => ErrorCode::AppUnresponsive,
         AdResult::ErrFocusStolen => ErrorCode::FocusStolen,
         AdResult::ErrFenced => ErrorCode::Fenced,
+        AdResult::ErrGlowUnavailable => ErrorCode::GlowUnavailable,
     })
 }
 
@@ -98,6 +99,7 @@ fn error_code_and_ad_result_error_variants_stay_in_bijection() {
         AdResult::ErrAppUnresponsive,
         AdResult::ErrFocusStolen,
         AdResult::ErrFenced,
+        AdResult::ErrGlowUnavailable,
     ] {
         let code = error_code_origin(result).expect("error variant must have an ErrorCode origin");
         assert_eq!(

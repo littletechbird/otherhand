@@ -143,6 +143,7 @@ to `role` or `value`.
 | `APP_UNRESPONSIVE` | The matching application stopped responding |
 | `FOCUS_STOLEN` | A headless command changed the foreground window or moved the cursor; the guard stopped it |
 | `FENCED` | The target is on the user's exclusion fence (`fence.json` or the built-in floor) |
+| `GLOW_UNAVAILABLE` | A focus-taking command refused because the screen glow was not visibly up, or the person has turned the warning off |
 | `PLATFORM_NOT_SUPPORTED` | Adapter method not implemented on this platform |
 | `TIMEOUT` | Wait condition expired, or a live identity read stayed incomplete until the deadline |
 | `INVALID_ARGS` | Invalid argument values |

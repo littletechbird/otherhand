@@ -54,6 +54,7 @@ pub(crate) fn resolve_executable(id: &str) -> Result<PathBuf, AdapterError> {
     if is_absolute_launch_path(id) {
         let path = PathBuf::from(id);
         if path.is_file() {
+            refuse_batch_script(&path)?;
             return Ok(path);
         }
         return Err(
@@ -68,6 +69,7 @@ pub(crate) fn resolve_executable(id: &str) -> Result<PathBuf, AdapterError> {
     for directory in [system32, windows] {
         let candidate = directory.join(id);
         if candidate.is_file() {
+            refuse_batch_script(&candidate)?;
             return Ok(candidate);
         }
     }
@@ -79,6 +81,19 @@ pub(crate) fn resolve_executable(id: &str) -> Result<PathBuf, AdapterError> {
     .with_suggestion(
         "Pass an absolute path, or a bare name that exists under System32 or the Windows directory.",
     ))
+}
+
+fn refuse_batch_script(path: &std::path::Path) -> Result<(), AdapterError> {
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    if ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd") {
+        Err(AdapterError::new(
+            ErrorCode::InvalidArgs,
+            "Launch refuses .bat and .cmd targets because cmd.exe parses their arguments separately",
+        )
+        .with_suggestion("Launch the program the script would start, or pass a .exe path."))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn image_file_name(id: &str) -> &str {
@@ -219,6 +234,18 @@ fn invalid_identifier(id: &str) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_scripts_are_refused_before_create_process() {
+        let bat =
+            refuse_batch_script(std::path::Path::new(r"C:\Windows\System32\go.bat")).unwrap_err();
+        assert_eq!(bat.code, ErrorCode::InvalidArgs);
+        let cmd = refuse_batch_script(std::path::Path::new(r"C:\work\build.CMD")).unwrap_err();
+        assert_eq!(cmd.code, ErrorCode::InvalidArgs);
+        assert!(
+            refuse_batch_script(std::path::Path::new(r"C:\Windows\System32\notepad.exe")).is_ok()
+        );
+    }
 
     #[test]
     fn absolute_and_bare_names_are_accepted() {

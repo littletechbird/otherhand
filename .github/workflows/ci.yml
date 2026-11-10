@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Release version matches the workspace
+        shell: bash
+        run: |
+          cargo build --locked -p agent-desktop
+          PACKAGE_ID=$(cargo pkgid -p agent-desktop)
+          EXPECTED_VERSION=${PACKAGE_ID##*@}
+          EXPECTED_OUTPUT="agent-desktop $EXPECTED_VERSION"
+          ACTUAL_OUTPUT=$(./target/debug/agent-desktop.exe --version | tr -d '\r')
+          if [ "$ACTUAL_OUTPUT" != "$EXPECTED_OUTPUT" ]; then
+            echo "version mismatch: $ACTUAL_OUTPUT"
+            exit 1
+          fi
+      - name: Clippy
+        shell: bash
+        run: cargo clippy --locked -p agent-desktop-core -p agent-desktop-windows -p agent-desktop -p agent-desktop-ffi --all-targets -- -D warnings
+      - run: cargo test --locked -p agent-desktop
+      - run: cargo test --locked -p agent-desktop-ffi --tests
+      - run: cargo test --locked -p agent-desktop-windows --examples
+      - name: Core and Windows unit tests
+        run: cargo test --locked -p agent-desktop-core -p agent-desktop-windows --lib
+      - name: Release binary and profile checks
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p agent-desktop
+          $arguments = @('tree', '--locked', '-p', 'agent-desktop-core', '--edges', 'normal,build,dev')
+          & cargo @arguments
+          $shimCount = (Select-String -Path crates/core/src/storage/private_file.rs -Pattern '#\[cfg\(windows\)\]').Count
+          if ($shimCount -ne 2) {
+            Write-Host "FAIL: expected exactly 2 windows cfg shims in private_file.rs, found $shimCount"
+            exit 1
+          }
+          Get-Item target/release/agent-desktop.exe
+          $env:ORIGINAL_USERPROFILE=$env:USERPROFILE
+          Write-Host "Guard profile isolation"
+          # Relocated-home checks print this when the home escapes the runner temp:
+          # FAIL: HOME is not under RUNNER_TEMP

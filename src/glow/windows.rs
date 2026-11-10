@@ -26,8 +26,8 @@
 
 use super::{
     CONTROL_CLASS, CaptureHides, CaptureMode, FRAME_CLASS, GlowConfig, HelperArgs, Holders, Rect,
-    capture_mode, keep_unexcluded_strip, pack_config, pulse_alpha, rebuild_due, render_strip,
-    scaled_thickness, strips, unix_ms, unpack_config, write_note,
+    capture_mode, keep_unexcluded_strip, pack_config, rebuild_due, render_strip, scaled_thickness,
+    strips, unix_ms, unpack_config, write_note,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -68,7 +68,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const MSG_BEGIN: u32 = WM_APP + 0x4F1;
+pub(super) const MSG_BEGIN: u32 = WM_APP + 0x4F1;
 const MSG_END: u32 = WM_APP + 0x4F2;
 /// Sent (not posted) by a command about to capture; answered once the frame
 /// is off the screen.
@@ -86,7 +86,54 @@ const SPAWN_NOTE: &str = "glow spawn.json";
 const TICK_MS: u32 = 40;
 const PRUNE_EVERY_MS: u64 = 250;
 const RAISE_EVERY_MS: u64 = 500;
-const MUTEX_NAME: &str = "Local\\OtherhandGlowHelper";
+fn mutex_name() -> String {
+    super::warn::mutex_name(current_user_sid().as_deref())
+}
+
+fn current_user_sid() -> Option<String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut needed = 0u32;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        if needed == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        let ok = GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        );
+        if ok == 0 {
+            CloseHandle(token);
+            return None;
+        }
+        let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+        let mut raw = std::ptr::null_mut();
+        if ConvertSidToStringSidW(user.User.Sid, &mut raw) == 0 || raw.is_null() {
+            CloseHandle(token);
+            return None;
+        }
+        let mut len = 0usize;
+        while len < 200 && *raw.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(raw, len));
+        LocalFree(raw.cast());
+        CloseHandle(token);
+        Some(text)
+    }
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -107,15 +154,6 @@ fn control_window() -> HWND {
 /// The settings travel with every begin (see `pack_config`).
 fn config_param(cfg: &GlowConfig) -> LPARAM {
     pack_config(cfg) as LPARAM
-}
-
-pub(super) fn client_begin(cfg: &GlowConfig) {
-    let pid = unsafe { GetCurrentProcessId() };
-    let ctl = control_window();
-    if !ctl.is_null() && unsafe { PostMessageW(ctl, MSG_BEGIN, pid as WPARAM, config_param(cfg)) } != 0 {
-        return;
-    }
-    spawn_helper(&HelperArgs { first_pid: Some(pid), config: *cfg });
 }
 
 pub(super) fn client_release() {
@@ -232,9 +270,9 @@ pub(super) fn leftover_strips() -> Vec<Rect> {
 /// caller's stdout open, and with no console of its own.
 static SPAWNED: AtomicBool = AtomicBool::new(false);
 
-fn spawn_helper(args: &HelperArgs) {
+pub(super) fn spawn_helper(args: &HelperArgs) -> bool {
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return false;
     };
     let mut line = format!("\"{}\"", exe.display());
     for a in args.to_args() {
@@ -284,6 +322,7 @@ fn spawn_helper(args: &HelperArgs) {
             "exe": exe.display().to_string(),
         }),
     );
+    ok != 0
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -327,7 +366,14 @@ unsafe extern "system" fn control_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARA
         };
         let t = helper.now();
         match msg {
-            MSG_BEGIN => helper.on_begin(w as u32, l as u64),
+            MSG_BEGIN => {
+                helper.on_begin(w as u32, l as u64);
+                let countdown = super::warn::countdown_from_packed(l as u64);
+                helper.holders.arm_countdown(t, countdown);
+                helper.update(t);
+                unsafe { DwmFlush() };
+                return helper.visible_ack() as LRESULT;
+            }
             MSG_END => helper.holders.end(w as u32, t),
             MSG_RELEASE => helper.holders.release(t),
             MSG_HIDE => return helper.on_hide(w as u32, t) as LRESULT,
@@ -659,6 +705,15 @@ impl Helper {
         self.started.elapsed().as_millis() as u64
     }
 
+    fn visible_ack(&self) -> usize {
+        let alpha = self.holders.frame_alpha(self.now());
+        if self.shown && alpha > 0 && !self.frame.is_empty() {
+            super::warn::pack_ack(self.frame.len() as u32, alpha)
+        } else {
+            0
+        }
+    }
+
     fn on_begin(&mut self, pid: u32, packed: u64) {
         if let Some(next) = unpack_config(packed) {
             if next.color != self.cfg.color
@@ -724,7 +779,7 @@ impl Helper {
                 self.shown = false;
                 self.dirty = true;
             }
-            let alpha = pulse_alpha(t);
+            let alpha = self.holders.frame_alpha(t);
             let errors = &mut self.errors;
             let before = self.frame.len();
             self.frame.retain(|s| s.present(alpha, errors));
@@ -830,7 +885,7 @@ fn composition_enabled() -> bool {
 
 pub(super) fn run_helper(args: HelperArgs) -> ExitCode {
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let name = wide(MUTEX_NAME);
+    let name = wide(&mutex_name());
     let mutex = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
     if mutex.is_null() {
         return ExitCode::FAILURE;

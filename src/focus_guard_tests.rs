@@ -168,3 +168,12 @@
             assert!(matches!(v, Verdict::Restored | Verdict::Stolen), "{away_ms} {back}: {v:?}");
         }
     }
+
+    #[test]
+    fn a_blind_foreground_blocks_a_focus_command_and_not_a_read() {
+        assert!(blocks_when_blind("type", ForegroundRead::Blind, true));
+        assert!(blocks_when_blind("press", ForegroundRead::Seen, false));
+        assert!(!blocks_when_blind("press", ForegroundRead::Seen, true));
+        assert!(!blocks_when_blind("snapshot", ForegroundRead::Blind, false));
+        assert!(!blocks_when_blind("type", ForegroundRead::Unsupported, false));
+    }
